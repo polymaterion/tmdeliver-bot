@@ -1,0 +1,75 @@
+# Явное имя проекта — все ресурсы (контейнеры, сеть, volume) получают префикс
+# "tmdeliverbot_", поэтому на VPS с другими docker-compose проектами исключены
+# случайные пересечения имён.
+name: tmdeliverbot
+
+services:
+  bot:
+    build: .
+    container_name: tmdeliverbot_bot
+    restart: unless-stopped
+    env_file:
+      - .env
+    environment:
+      # DATABASE_URL собирается здесь, а не в .env — переменные внутри .env
+      # НЕ раскрываются самим Docker (${VAR} там воспринимается буквально),
+      # а вот интерполяция в этом файле (docker-compose.yml) работает всегда.
+      # "db" — это имя сервиса ниже, Docker сам резолвит его в IP контейнера.
+      DATABASE_URL: postgresql://tmdeliverbot:${POSTGRES_PASSWORD}@db:5432/tmdeliverbot
+    depends_on:
+      db:
+        condition: service_healthy
+    networks:
+      - internal
+    # Ограничение ресурсов — бот не должен мешать другим сервисам на VPS
+    deploy:
+      resources:
+        limits:
+          cpus: "0.5"
+          memory: 256M
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+  db:
+    image: postgres:16-alpine
+    container_name: tmdeliverbot_db
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: tmdeliverbot
+      POSTGRES_USER: tmdeliverbot
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+    volumes:
+      - db_data:/var/lib/postgresql/data
+    # Порт БД НЕ пробрасывается на хост (нет секции "ports") — база доступна
+    # только контейнеру bot внутри сети internal, остальные сервисы на VPS
+    # физически не могут к ней подключиться, даже по localhost.
+    networks:
+      - internal
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U tmdeliverbot -d tmdeliverbot"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+    deploy:
+      resources:
+        limits:
+          cpus: "0.5"
+          memory: 256M
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+networks:
+  # Отдельная bridge-сеть только для этого проекта — контейнеры других
+  # сервисов на VPS в неё не входят и друг друга не видят.
+  internal:
+    name: tmdeliverbot_internal
+
+volumes:
+  db_data:
+    name: tmdeliverbot_db_data

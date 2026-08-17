@@ -1,0 +1,18 @@
+# Секреты — никогда не коммитить
+.env
+.env.*
+!.env.example
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.venv/
+venv/
+
+# Логи, если вдруг пишутся в файл локально
+*.log
+
+# IDE
+.vscode/
+.idea/
