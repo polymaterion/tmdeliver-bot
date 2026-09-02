@@ -1,0 +1,147 @@
+{
+  "_readme": [
+    "Этот файл — редактируемый вручную справочник городов для выбора маршрута в боте.",
+    "Правь его прямо на VPS текстовым редактором (nano cities.json), затем",
+    "перезапусти бота: docker compose restart bot — только тогда изменения применятся.",
+    "",
+    "Структура: список стран. У каждой страны:",
+    "  - flag       — эмодзи-флаг страны (unicode, просто вставь его как символ)",
+    "  - name_ru    — название страны для комментария (в боте не показывается)",
+    "  - cities     — список городов этой страны, каждый город:",
+    "      - ru       — каноническое русское название (используется в БД, поиске, итоговом посте канала)",
+    "      - tk       — как показать на туркменском языке (если не знаешь — можно продублировать ru)",
+    "      - popular  — true/false: города с popular=true попадают в кнопки быстрого выбора",
+    "                   (сейчас топ-10 таких кнопок собираются по порядку появления в файле,",
+    "                   независимо от страны). Остальные ищутся через 'Другой город'.",
+    "",
+    "Не удаляй уже существующие города, если на них могут ссылаться опубликованные",
+    "объявления в базе данных — старые объявления хранят русское название как текст,",
+    "удаление города из файла не сломает уже опубликованные посты, но новые объявления",
+    "с этим городом создать станет нельзя ни кнопкой, ни вводом.",
+    "",
+    "Чтобы добавить новую страну — скопируй один блок { ... } целиком и измени",
+    "flag/name_ru/города. Порядок стран и городов в файле роли не играет, кроме",
+    "порядка первых 10 popular=true городов (они и есть кнопки в боте)."
+  ],
+  "countries": [
+    {
+      "flag": "🇷🇺",
+      "name_ru": "Россия",
+      "cities": [
+        { "ru": "Москва",             "tk": "Moskwa",           "popular": true  },
+        { "ru": "Санкт-Петербург",    "tk": "Sankt-Peterburg",  "popular": true  },
+        { "ru": "Казань",             "tk": "Kazan",            "popular": true  },
+        { "ru": "Екатеринбург",       "tk": "Ýekaterinburg",    "popular": false },
+        { "ru": "Новосибирск",        "tk": "Nowosibirsk",      "popular": false },
+        { "ru": "Красноярск",         "tk": "Krasnoýarsk",      "popular": false },
+        { "ru": "Нижний Новгород",    "tk": "Nižniý Nowgorod",  "popular": false },
+        { "ru": "Челябинск",          "tk": "Çelýabinsk",       "popular": false },
+        { "ru": "Уфа",                "tk": "Ufa",              "popular": false },
+        { "ru": "Самара",             "tk": "Samara",           "popular": false },
+        { "ru": "Ростов-на-Дону",     "tk": "Rostow-na-Donu",   "popular": false },
+        { "ru": "Краснодар",          "tk": "Krasnodar",        "popular": false },
+        { "ru": "Омск",               "tk": "Omsk",             "popular": false },
+        { "ru": "Воронеж",            "tk": "Woronež",          "popular": false },
+        { "ru": "Пермь",              "tk": "Perm",             "popular": false },
+        { "ru": "Волгоград",          "tk": "Wolgograd",        "popular": false },
+        { "ru": "Саратов",            "tk": "Saratow",          "popular": false },
+        { "ru": "Тюмень",             "tk": "Týumen",           "popular": false },
+        { "ru": "Тольятти",           "tk": "Tolýatti",         "popular": false },
+        { "ru": "Махачкала",          "tk": "Mahaçkala",        "popular": false },
+        { "ru": "Майкоп",             "tk": "Maýkop",           "popular": false },
+        { "ru": "Сочи",               "tk": "Soçi",             "popular": false },
+        { "ru": "Набережные Челны",   "tk": "Naberežnye Çelny", "popular": false },
+        { "ru": "Елабуга",            "tk": "Ýelabuga",         "popular": false },
+        { "ru": "Оренбург",           "tk": "Orenburg",         "popular": false },
+        { "ru": "Ульяновск",          "tk": "Ulýanowsk",        "popular": false },
+        { "ru": "Пенза",              "tk": "Penza",            "popular": false }
+      ]
+    },
+    {
+      "flag": "🇹🇲",
+      "name_ru": "Туркменистан",
+      "cities": [
+        { "ru": "Ашхабад",         "tk": "Aşgabat",       "popular": true  },
+        { "ru": "Туркменабад",     "tk": "Türkmenabat",   "popular": true  },
+        { "ru": "Дашогуз",         "tk": "Daşoguz",       "popular": false },
+        { "ru": "Мары",            "tk": "Mary",          "popular": true  },
+        { "ru": "Туркменбаши",     "tk": "Türkmenbaşy",   "popular": false },
+        { "ru": "Балканабад",      "tk": "Balkanabat",    "popular": false },
+        { "ru": "Байрамали",       "tk": "Baýramaly",     "popular": false },
+        { "ru": "Теджен",          "tk": "Tejen",         "popular": false },
+        { "ru": "Керки",           "tk": "Kerki",         "popular": false },
+        { "ru": "Сердар",          "tk": "Serdar",        "popular": false },
+        { "ru": "Кёнеургенч",      "tk": "Köneürgenç",    "popular": false },
+        { "ru": "Гёкдепе",         "tk": "Gökdepe",       "popular": false },
+        { "ru": "Абадан",          "tk": "Abadan",        "popular": false },
+        { "ru": "Аркадаг",         "tk": "Arkadag",       "popular": false }
+      ]
+    },
+    {
+      "flag": "🇦🇪",
+      "name_ru": "ОАЭ",
+      "cities": [
+        { "ru": "Дубай",           "tk": "Dubaý",         "popular": true  },
+        { "ru": "Абу-Даби",        "tk": "Abu-Dabi",      "popular": false },
+        { "ru": "Шарджа",          "tk": "Şarja",         "popular": false }
+      ]
+    },
+    {
+      "flag": "🇹🇷",
+      "name_ru": "Турция",
+      "cities": [
+        { "ru": "Стамбул",         "tk": "Stambul",       "popular": true  },
+        { "ru": "Анкара",         "tk": "Ankara",        "popular": false },
+        { "ru": "Анталья",        "tk": "Antalýa",       "popular": false },
+        { "ru": "Измир",          "tk": "Izmir",         "popular": false },
+        { "ru": "Бурса",          "tk": "Bursa",         "popular": false }
+      ]
+    },
+    {
+      "flag": "🇧🇾",
+      "name_ru": "Беларусь",
+      "cities": [
+        { "ru": "Минск",          "tk": "Minsk",         "popular": true  },
+        { "ru": "Гомель",         "tk": "Gomel",         "popular": false },
+        { "ru": "Брест",          "tk": "Brest",         "popular": false },
+        { "ru": "Витебск",        "tk": "Witebsk",       "popular": false }
+      ]
+    },
+    {
+      "flag": "🇵🇱",
+      "name_ru": "Польша",
+      "cities": [
+        { "ru": "Варшава",        "tk": "Warşawa",       "popular": false },
+        { "ru": "Краков",         "tk": "Krakow",        "popular": false },
+        { "ru": "Вроцлав",        "tk": "Wroslaw",       "popular": false },
+        { "ru": "Гданьск",        "tk": "Gdansk",        "popular": false }
+      ]
+    },
+    {
+      "flag": "🇩🇪",
+      "name_ru": "Германия",
+      "cities": [
+        { "ru": "Берлин",         "tk": "Berlin",        "popular": false },
+        { "ru": "Мюнхен",         "tk": "Mýunhen",       "popular": false },
+        { "ru": "Франкфурт",      "tk": "Frankfurt",     "popular": false },
+        { "ru": "Гамбург",        "tk": "Gamburg",       "popular": false },
+        { "ru": "Кёльн",          "tk": "Köln",          "popular": false }
+      ]
+    },
+    {
+      "flag": "🇺🇸",
+      "name_ru": "США",
+      "cities": [
+        { "ru": "Нью-Йорк",       "tk": "Nýu-Ýork",      "popular": true  },
+        { "ru": "Лос-Анджелес",   "tk": "Los-Anjeles",   "popular": false },
+        { "ru": "Чикаго",         "tk": "Çikago",        "popular": false },
+        { "ru": "Хьюстон",        "tk": "Hýuston",       "popular": false },
+        { "ru": "Вашингтон",      "tk": "Waşington",     "popular": false },
+        { "ru": "Майами",         "tk": "Maýami",        "popular": false },
+        { "ru": "Орландо",        "tk": "Orlando",       "popular": false },
+        { "ru": "Сиэтл",          "tk": "Sietl",         "popular": false },
+        { "ru": "Бостон",         "tk": "Boston",        "popular": false }
+      ]
+    }
+  ]
+}

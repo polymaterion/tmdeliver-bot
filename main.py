@@ -1,4 +1,5 @@
 import asyncio
+import difflib
 import html
 import json
 import logging
@@ -24,7 +25,7 @@ from aiogram.filters import ChatMemberUpdatedFilter, IS_MEMBER, IS_NOT_MEMBER
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 from dotenv import load_dotenv
 
-from locales import t, LANGUAGES, DEFAULT_LANG, city_name
+from locales import t, LANGUAGES, DEFAULT_LANG, city_name, ANY_CITY_NAMES, POPULAR_CITIES
 from emojis import e, raw, entity_emoji, city_flag, city_flag_entity, EMOJIS
 
 load_dotenv()
@@ -63,14 +64,81 @@ ADMIN_IDS = parse_admin_ids(ADMIN_IDS_RAW)
 # Кэш username бота — заполняется в main()
 BOT_USERNAME: str = ""
 
-CITIES = [
-    "Москва", "Санкт-Петербург",
-    "Казань", "Ашхабад",
-    "Туркменабад", "Дашогуз",
-    "Мары",
-]
+# 10 городов для кнопок быстрого выбора — берутся из cities.json
+# (поле popular=true у нужных городов, см. locales.py:_load_cities_from_json).
+# Любой другой город из cities.json доступен через "Другой город" (ручной
+# ввод с поиском, см. find_city_match).
+CITIES = POPULAR_CITIES
 
 # Флаги городов теперь в emojis.py (CITY_FLAGS, city_flag)
+
+
+# Разговорные названия/сокращения, которые по буквенному сходству не всегда
+# похожи на официальное название (нечёткий поиск их не поймает или, хуже,
+# спутает с другим городом — например "Питер" по буквам ближе к "Пермь").
+_CITY_ALIASES: dict[str, str] = {
+    "питер":      "Санкт-Петербург",
+    "спб":        "Санкт-Петербург",
+    "санкт петербург": "Санкт-Петербург",
+    "нижний":     "Нижний Новгород",
+    "нн":         "Нижний Новгород",
+    "ростов":     "Ростов-на-Дону",
+    "ашгабат":    "Ашхабад",
+    "чарджоу":    "Туркменабад",
+    "чарджев":    "Туркменабад",
+    "ташауз":     "Дашогуз",
+    "красноводск": "Туркменбаши",
+    "небитдаг":   "Балканабад",
+}
+
+
+def _all_city_lookup_names() -> dict[str, str]:
+    """
+    Строит плоский словарь "любое известное написание -> канонический русский
+    город" из ANY_CITY_NAMES (объединяя ru- и tk-варианты) — используется для
+    поиска города по ручному вводу. Пересчитывается при каждом вызове
+    find_city_match, но словарь маленький (~35 городов x 2 языка), стоимость
+    пренебрежимо мала на фоне сетевого round-trip к Telegram API.
+    """
+    lookup: dict[str, str] = {}
+    for lang_dict in ANY_CITY_NAMES.values():
+        for canonical, localized in lang_dict.items():
+            lookup[localized.casefold().strip()] = canonical
+            lookup[canonical.casefold().strip()] = canonical
+    return lookup
+
+
+def find_city_match(query: str) -> tuple[Optional[str], list[str]]:
+    """
+    Ищет город по произвольному вводу пользователя среди ANY_CITY_NAMES.
+
+    Возвращает (exact, suggestions):
+      - exact — канонический русский город, если найдено точное совпадение
+        (без учёта регистра/пробелов, по любому языковому варианту записи);
+        иначе None.
+      - suggestions — до 3 ближайших кандидатов (канонические русские имена)
+        по нечёткому совпадению, если точного совпадения нет. Пустой список,
+        если ничего похожего не нашлось совсем.
+    """
+    normalized = query.casefold().strip()
+
+    if normalized in _CITY_ALIASES:
+        return _CITY_ALIASES[normalized], []
+
+    lookup = _all_city_lookup_names()
+
+    if normalized in lookup:
+        return lookup[normalized], []
+
+    close = difflib.get_close_matches(normalized, lookup.keys(), n=5, cutoff=0.6)
+    suggestions: list[str] = []
+    for key in close:
+        canonical = lookup[key]
+        if canonical not in suggestions:
+            suggestions.append(canonical)
+        if len(suggestions) == 3:
+            break
+    return None, suggestions
 
 # Команды для фильтрации городских групп: /moscow, /kazan, /spb
 # Легко расширяется — просто добавь новую пару в словарь.
@@ -264,6 +332,7 @@ class Form(StatesGroup):
     seeker_username = State()
     # Общее
     feedback        = State()
+    custom_city_input = State()
 
 
 class BroadcastForm(StatesGroup):
@@ -424,6 +493,38 @@ async def create_draft(d: dict[str, Any]) -> int:
         return int(row["id"])
 
 
+async def republish_draft(bot: Bot, draft_id: int) -> bool:
+    """
+    "Повторяет" уже существующее объявление — используется когда пользователь
+    пытается создать точно такое же объявление (см. find_own_duplicate) и
+    выбирает "Повторить" вместо отказа. Завершает старый пост в канале
+    (зачёркивание + удаление тизеров), затем публикует объявление заново под
+    тем же draft_id — новый пост в канале и новые тизеры в группах, чтобы
+    объявление снова оказалось свежим и наверху ленты.
+    Возвращает True при успехе.
+    """
+    row = await get_draft(draft_id)
+    if row is None:
+        return False
+
+    await _expire_channel_post(bot, row)
+
+    row = await get_draft(draft_id)  # перечитываем — expired/channel_msg_id могли обновиться
+    channel_msg_id = await _do_publish(bot, row)
+    if not channel_msg_id:
+        return False
+
+    async with pool().acquire() as conn:
+        await conn.execute(
+            "UPDATE drafts SET published=TRUE, expired=FALSE, channel_msg_id=$1 WHERE id=$2",
+            channel_msg_id, draft_id,
+        )
+
+    row = await get_draft(draft_id)
+    await _publish_to_groups(bot, row, channel_msg_id)
+    return True
+
+
 async def get_draft(draft_id: int) -> Optional[asyncpg.Record]:
     async with pool().acquire() as conn:
         return await conn.fetchrow("SELECT * FROM drafts WHERE id=$1", draft_id)
@@ -471,6 +572,47 @@ async def get_teasers(draft_id: int) -> list[tuple[str, int]]:
             "SELECT chat_id, msg_id FROM teasers WHERE draft_id=$1", draft_id
         )
     return [(r["chat_id"], r["msg_id"]) for r in rows]
+
+
+def _normalize_phone(phone: str) -> str:
+    """Убирает пробелы/дефисы/скобки для устойчивого сравнения телефонов —
+    "+7 999 123-45-67" и "+79991234567" должны считаться одним номером."""
+    return re.sub(r"[\s\-()]", "", phone or "")
+
+
+async def find_own_duplicate(user_id: int, ad_type: str, cities: list[str],
+                             travel_date: str, phone: str,
+                             custom_username: Optional[str]) -> Optional[asyncpg.Record]:
+    """
+    Ищет среди АКТИВНЫХ объявлений этого же пользователя одно с тем же
+    маршрутом, датой и контактами — используется перед публикацией нового
+    объявления, чтобы предложить "Повторить" вместо создания дубликата.
+
+    Идентичны, если совпадают: маршрут (тот же порядок городов), дата,
+    телефон (после нормализации пробелов/дефисов) и custom_username
+    (без учёта регистра, с учётом что оба могут быть None/пустыми).
+    """
+    active = await get_active_drafts(user_id)
+    norm_phone = _normalize_phone(phone)
+    norm_uname = (custom_username or "").casefold().strip()
+
+    for row in active:
+        if row["ad_type"] != ad_type:
+            continue
+        try:
+            route: list[str] = json.loads(row["route"])
+        except (json.JSONDecodeError, TypeError):
+            continue
+        if route != cities:
+            continue
+        if row["travel_date"] != travel_date:
+            continue
+        if _normalize_phone(row["phone"] or "") != norm_phone:
+            continue
+        if (row["custom_username"] or "").casefold().strip() != norm_uname:
+            continue
+        return row
+    return None
 
 
 async def get_active_drafts(user_id: int) -> list[asyncpg.Record]:
@@ -1041,12 +1183,21 @@ def kb_city_count_lang(lang: str) -> InlineKeyboardMarkup:
     ]])
 
 
+def _with_city_hint(lang: str, base_text: str) -> str:
+    """Добавляет подсказку про ручной ввод города ко всем экранам выбора
+    города — единая точка, чтобы не редактировать 5+ разных мест вызова
+    kb_cities() по отдельности."""
+    return f"{base_text}\n\n{t(lang, 'city_pick_hint')}"
+
+
 def kb_cities(lang: str, prefix: str, exclude: Optional[str] = None,
              with_back: bool = True) -> InlineKeyboardMarkup:
     """
     Кнопки городов. Callback остаётся числовым индексом в CITIES (канонический
     русский список — источник правды для БД), а текст на кнопке — переведён
-    на язык пользователя через city_name().
+    на язык пользователя через city_name(). Плюс кнопка "Другой город" —
+    ведёт на текстовый ввод с поиском по расширенному справочнику
+    ANY_CITY_NAMES (см. Form.custom_city_input).
     """
     b = InlineKeyboardBuilder()
     for i, city in enumerate(CITIES):
@@ -1054,6 +1205,7 @@ def kb_cities(lang: str, prefix: str, exclude: Optional[str] = None,
             continue
         b.button(text=city_name(lang, city), callback_data=f"{prefix}:{i}")
     b.adjust(2)
+    b.row(InlineKeyboardButton(text=t(lang, "btn_other_city"), callback_data=f"{prefix}:custom"))
     if not with_back:
         return b.as_markup()
     b.row(InlineKeyboardButton(text=t(lang, "btn_back"), callback_data="nav:back"))
@@ -1385,6 +1537,47 @@ async def _publish_to_groups(bot: Bot, draft: asyncpg.Record, channel_msg_id: in
             )
 
 
+async def _expire_channel_post(bot: Bot, row: asyncpg.Record) -> None:
+    """
+    Зачёркивает пост в канале и удаляет тизеры в группах — общая логика,
+    используемая и фоновым планировщиком (когда истёк срок объявления), и
+    republish-флоу "Повторить" (когда пользователь пересоздаёт то же
+    объявление — старый пост нужно завершить перед публикацией нового).
+    Помечает draft как expired=TRUE.
+    """
+    draft_id = int(row["id"])
+    try:
+        cities  = parse_route(row)
+        ad_type = row["ad_type"] or "carrier"
+        exp_text, exp_entities = _build_post_entities(
+            cities=cities,
+            travel_date=str(row["travel_date"]),
+            cargo=str(row["cargo"]),
+            phone=str(row["phone"] or ""),
+            custom_username=row["custom_username"],
+            expired=True,
+            ad_type=ad_type,
+        )
+        if row["channel_msg_id"]:
+            await bot.edit_message_text(
+                chat_id=CHANNEL_ID,
+                message_id=int(row["channel_msg_id"]),
+                text=exp_text,
+                entities=exp_entities,
+                disable_web_page_preview=True,
+            )
+        await mark_expired(draft_id)
+
+        # В группах — удаляем тизер полностью (не зачёркиваем)
+        for t_chat_id, t_msg_id in await get_teasers(draft_id):
+            try:
+                await bot.delete_message(chat_id=t_chat_id, message_id=t_msg_id)
+            except Exception as te:
+                logger.warning("Group teaser delete failed %s/%s: %s", t_chat_id, t_msg_id, te)
+    except Exception as e:
+        logger.exception("Expire edit failed (draft %s): %s", draft_id, e)
+
+
 # ── Background scheduler ──────────────────────────────────────────────────────
 
 async def scheduler_loop(bot: Bot) -> None:
@@ -1414,37 +1607,8 @@ async def scheduler_loop(bot: Bot) -> None:
 
         # ── Зачёркиваем истёкшие в канале + удаляем тизеры в группах ──────────
         for row in await get_to_expire():
-            draft_id = int(row["id"])
-            logger.info("Scheduler: expiring draft %s", draft_id)
-            try:
-                cities  = parse_route(row)
-                ad_type = row["ad_type"] or "carrier"
-                exp_text, exp_entities = _build_post_entities(
-                    cities=cities,
-                    travel_date=str(row["travel_date"]),
-                    cargo=str(row["cargo"]),
-                    phone=str(row["phone"] or ""),
-                    custom_username=row["custom_username"],
-                    expired=True,
-                    ad_type=ad_type,
-                )
-                await bot.edit_message_text(
-                    chat_id=CHANNEL_ID,
-                    message_id=int(row["channel_msg_id"]),
-                    text=exp_text,
-                    entities=exp_entities,
-                    disable_web_page_preview=True,
-                )
-                await mark_expired(draft_id)
-
-                # В группах — удаляем тизер полностью (не зачёркиваем)
-                for t_chat_id, t_msg_id in await get_teasers(draft_id):
-                    try:
-                        await bot.delete_message(chat_id=t_chat_id, message_id=t_msg_id)
-                    except Exception as te:
-                        logger.warning("Group teaser delete failed %s/%s: %s", t_chat_id, t_msg_id, te)
-            except Exception as e:
-                logger.exception("Expire edit failed (draft %s): %s", draft_id, e)
+            logger.info("Scheduler: expiring draft %s", int(row["id"]))
+            await _expire_channel_post(bot, row)
 
 
 # ── Route helpers ─────────────────────────────────────────────────────────────
@@ -1781,7 +1945,7 @@ async def render_seeker_origin(bot: Bot, chat_id: int, state: FSMContext, lang: 
     await push_screen(state, "seeker:origin")
     sent = await replace_bot_msg(
         bot, chat_id, old_id,
-        t(lang, "seeker_city_from"),
+        _with_city_hint(lang, t(lang, "seeker_city_from")),
         markup=kb_cities(lang, "sorigin"),
     )
     await state.update_data(bot_msg_id=sent.message_id)
@@ -1793,15 +1957,31 @@ async def render_seeker_origin(bot: Bot, chat_id: int, state: FSMContext, lang: 
 async def seeker_pick_origin(callback: CallbackQuery, state: FSMContext, bot: Bot) -> None:
     await callback.answer()
     lang = await get_user_lang(callback.from_user.id)
-    city = CITIES[int(callback.data.split(":")[1])]
+    arg = callback.data.split(":")[1]
+
+    if arg == "custom":
+        await start_custom_city_input(bot, callback.message.chat.id, state, lang,
+                                      return_prefix="sorigin",
+                                      old_id=callback.message.message_id)
+        return
+
+    city = CITIES[int(arg)]
+    await _seeker_origin_chosen(bot, callback.message.chat.id, state, lang, city,
+                                old_id=callback.message.message_id)
+
+
+async def _seeker_origin_chosen(bot: Bot, chat_id: int, state: FSMContext, lang: str,
+                                city: str, old_id: Optional[int]) -> None:
+    """Общая логика после выбора города-откуда — вызывается и с кнопки, и
+    после ручного ввода города через start_custom_city_input."""
     await state.update_data(seeker_origin=city)
     await state.set_state(Form.seeker_dest)
     await push_screen(state, "seeker:dest")
     data = await state.get_data()
     sent = await replace_bot_msg(
-        bot, callback.message.chat.id,
-        data.get("bot_msg_id") or callback.message.message_id,
-        t(lang, "seeker_from_confirmed", city=esc(city_name(lang, city))),
+        bot, chat_id,
+        data.get("bot_msg_id") or old_id,
+        _with_city_hint(lang, t(lang, "seeker_from_confirmed", city=esc(city_name(lang, city)))),
         markup=kb_cities(lang, "sdest", exclude=city),
     )
     await state.update_data(bot_msg_id=sent.message_id)
@@ -1810,15 +1990,33 @@ async def seeker_pick_origin(callback: CallbackQuery, state: FSMContext, bot: Bo
 @router.callback_query(Form.seeker_dest, F.data.startswith("sdest:"))
 async def seeker_pick_dest(callback: CallbackQuery, state: FSMContext, bot: Bot) -> None:
     lang = await get_user_lang(callback.from_user.id)
-    city = CITIES[int(callback.data.split(":")[1])]
+    arg = callback.data.split(":")[1]
+
+    if arg == "custom":
+        await callback.answer()
+        await start_custom_city_input(bot, callback.message.chat.id, state, lang,
+                                      return_prefix="sdest",
+                                      old_id=callback.message.message_id)
+        return
+
+    city = CITIES[int(arg)]
     data = await state.get_data()
     if data.get("seeker_origin") == city:
         await callback.answer(t(lang, "seeker_choose_other_city"), show_alert=True)
         return
     await callback.answer()
+    await _seeker_dest_chosen(bot, callback.message.chat.id, state, lang, city,
+                              old_id=callback.message.message_id)
+
+
+async def _seeker_dest_chosen(bot: Bot, chat_id: int, state: FSMContext, lang: str,
+                              city: str, old_id: Optional[int]) -> None:
+    """Общая логика после выбора города-куда — вызывается и с кнопки, и
+    после ручного ввода города."""
+    data = await state.get_data()
     await state.update_data(seeker_dest=city)
-    await render_seeker_days(bot, callback.message.chat.id, state, lang,
-                             data.get("bot_msg_id") or callback.message.message_id)
+    await render_seeker_days(bot, chat_id, state, lang,
+                             data.get("bot_msg_id") or old_id)
 
 
 async def render_seeker_days(bot: Bot, chat_id: int, state: FSMContext, lang: str,
@@ -2070,27 +2268,156 @@ async def render_picking_city(bot: Bot, chat_id: int, state: FSMContext, lang: s
     last  = cities[-1] if cities else None
     sent = await replace_bot_msg(
         bot, chat_id, old_id,
-        _city_step_text(lang, step, count, cities),
+        _with_city_hint(lang, _city_step_text(lang, step, count, cities)),
         markup=kb_cities(lang, "city", exclude=last),
     )
     await state.update_data(bot_msg_id=sent.message_id)
 
 
+# ── Ручной ввод города ("Другой город") ─────────────────────────────────────
+#
+# Один общий механизм для всех трёх мест выбора города (seeker origin/dest,
+# carrier picking_city). return_prefix, сохранённый в state, говорит куда
+# продолжить флоу после того, как город определён — так же, как это делает
+# сам числовой callback ({prefix}:{index}), но в обход кнопок.
+
+async def start_custom_city_input(bot: Bot, chat_id: int, state: FSMContext, lang: str,
+                                  return_prefix: str, old_id: Optional[int]) -> None:
+    await state.update_data(custom_city_return_prefix=return_prefix)
+    await state.set_state(Form.custom_city_input)
+    sent = await replace_bot_msg(
+        bot, chat_id, old_id,
+        t(lang, "ask_custom_city"),
+        markup=kb_back_only(lang),
+    )
+    await state.update_data(bot_msg_id=sent.message_id)
+
+
+async def _continue_after_city_chosen(bot: Bot, chat_id: int, state: FSMContext,
+                                      lang: str, city: str, old_id: Optional[int]) -> None:
+    """Продолжает нужный флоу после того, как город определён вручную —
+    диспетчер по return_prefix, сохранённому в start_custom_city_input."""
+    data = await state.get_data()
+    return_prefix = data.get("custom_city_return_prefix")
+
+    if return_prefix == "sorigin":
+        await _seeker_origin_chosen(bot, chat_id, state, lang, city, old_id)
+    elif return_prefix == "sdest":
+        if data.get("seeker_origin") == city:
+            await _send(bot, chat_id, t(lang, "seeker_choose_other_city"))
+            await render_seeker_dest_screen(bot, chat_id, state, lang, old_id)
+            return
+        await _seeker_dest_chosen(bot, chat_id, state, lang, city, old_id)
+    elif return_prefix == "city":
+        cities: list[str] = data.get("cities", [])
+        if cities and cities[-1] == city:
+            await _send(bot, chat_id, t(lang, "city_already_used"))
+            await render_picking_city(bot, chat_id, state, lang, old_id)
+            return
+        await _picking_city_chosen(bot, chat_id, state, lang, city, old_id)
+
+
+async def render_seeker_dest_screen(bot: Bot, chat_id: int, state: FSMContext, lang: str,
+                                    old_id: Optional[int]) -> None:
+    """Переотрисовка экрана seeker:dest (например, после невалидного выбора
+    того же города, что и origin, при ручном вводе)."""
+    data = await state.get_data()
+    origin = data.get("seeker_origin")
+    await state.set_state(Form.seeker_dest)
+    await push_screen(state, "seeker:dest")
+    sent = await replace_bot_msg(
+        bot, chat_id, old_id,
+        _with_city_hint(lang, t(lang, "seeker_from_confirmed", city=esc(city_name(lang, origin))) if origin
+                       else t(lang, "seeker_city_to")),
+        markup=kb_cities(lang, "sdest", exclude=origin),
+    )
+    await state.update_data(bot_msg_id=sent.message_id)
+
+
+@router.message(Form.custom_city_input)
+async def receive_custom_city(message: Message, state: FSMContext, bot: Bot) -> None:
+    lang = await get_user_lang(message.from_user.id)
+    query = (message.text or "").strip()
+
+    if not query:
+        await after_user_msg(bot, message.chat.id, state, t(lang, "ask_custom_city"),
+                             markup=kb_back_only(lang))
+        return
+
+    exact, suggestions = find_city_match(query)
+
+    if exact:
+        data = await state.get_data()
+        await cleanup_aux(bot, message.chat.id, state)
+        await _continue_after_city_chosen(bot, message.chat.id, state, lang, exact,
+                                          old_id=data.get("bot_msg_id"))
+        return
+
+    if not suggestions:
+        await after_user_msg(
+            bot, message.chat.id, state,
+            t(lang, "city_not_found"),
+            markup=kb_back_only(lang),
+        )
+        return
+
+    b = InlineKeyboardBuilder()
+    for city in suggestions:
+        b.button(text=city_name(lang, city), callback_data=f"citysuggest:{city}")
+    b.adjust(1)
+    b.row(InlineKeyboardButton(text=t(lang, "btn_back"), callback_data="nav:back"))
+    await after_user_msg(
+        bot, message.chat.id, state,
+        t(lang, "city_suggestions"),
+        markup=b.as_markup(),
+    )
+
+
+@router.callback_query(Form.custom_city_input, F.data.startswith("citysuggest:"))
+async def pick_city_suggestion(callback: CallbackQuery, state: FSMContext, bot: Bot) -> None:
+    await callback.answer()
+    lang = await get_user_lang(callback.from_user.id)
+    city = callback.data.split(":", 1)[1]
+    data = await state.get_data()
+    await _continue_after_city_chosen(
+        bot, callback.message.chat.id, state, lang, city,
+        old_id=data.get("bot_msg_id") or callback.message.message_id,
+    )
+
+
 @router.callback_query(Form.picking_city, F.data.startswith("city:"))
 async def pick_city(callback: CallbackQuery, state: FSMContext, bot: Bot) -> None:
     lang = await get_user_lang(callback.from_user.id)
-    idx  = int(callback.data.split(":")[1])
-    city = CITIES[idx]
-    data = await state.get_data()
+    arg  = callback.data.split(":")[1]
 
+    if arg == "custom":
+        await callback.answer()
+        await start_custom_city_input(bot, callback.message.chat.id, state, lang,
+                                      return_prefix="city",
+                                      old_id=callback.message.message_id)
+        return
+
+    city = CITIES[int(arg)]
+    data = await state.get_data()
     cities: list[str] = data.get("cities", [])
-    count: int        = data.get("city_count", 2)
 
     if cities and cities[-1] == city:
         await callback.answer(t(lang, "city_already_used"), show_alert=True)
         return
 
     await callback.answer()
+    await _picking_city_chosen(bot, callback.message.chat.id, state, lang, city,
+                               old_id=callback.message.message_id)
+
+
+async def _picking_city_chosen(bot: Bot, chat_id: int, state: FSMContext, lang: str,
+                               city: str, old_id: Optional[int]) -> None:
+    """Общая логика после выбора очередного города маршрута (carrier) —
+    вызывается и с кнопки, и после ручного ввода города."""
+    data = await state.get_data()
+    cities: list[str] = data.get("cities", [])
+    count: int        = data.get("city_count", 2)
+
     cities = cities + [city]
     await state.update_data(cities=cities)
 
@@ -2098,12 +2425,12 @@ async def pick_city(callback: CallbackQuery, state: FSMContext, bot: Bot) -> Non
 
     if step < count:
         await render_picking_city(
-            bot, callback.message.chat.id, state, lang,
-            data.get("bot_msg_id") or callback.message.message_id,
+            bot, chat_id, state, lang,
+            data.get("bot_msg_id") or old_id,
         )
     else:
-        await render_date(bot, callback.message.chat.id, state, lang, cities,
-                          data.get("bot_msg_id") or callback.message.message_id)
+        await render_date(bot, chat_id, state, lang, cities,
+                          data.get("bot_msg_id") or old_id)
 
 
 async def render_date(bot: Bot, chat_id: int, state: FSMContext, lang: str,
@@ -2291,6 +2618,20 @@ async def confirm_yes(callback: CallbackQuery, state: FSMContext, bot: Bot) -> N
     user      = callback.from_user
     full_name = user.full_name or "Пользователь"
 
+    duplicate = await find_own_duplicate(user.id, ad_type, cities, travel_d, phone, cuname)
+    if duplicate is not None:
+        await state.update_data(duplicate_draft_id=int(duplicate["id"]))
+        await push_screen(state, "duplicate_warning")
+        await replace_bot_msg(
+            bot, callback.message.chat.id,
+            data.get("bot_msg_id") or callback.message.message_id,
+            t(lang, "duplicate_found"),
+            markup=kb_with_back(lang, [[
+                InlineKeyboardButton(text=t(lang, "btn_repeat_ad"), callback_data="confirm:repeat"),
+            ]]),
+        )
+        return
+
     draft_id = await create_draft({
         "user_id":         user.id,
         "tg_username":     user.username,
@@ -2324,6 +2665,31 @@ async def confirm_yes(callback: CallbackQuery, state: FSMContext, bot: Bot) -> N
         t(lang, "ad_sent_for_review"),
     )
     await save_pending_msg(draft_id, callback.message.chat.id, sent.message_id)
+
+
+@router.callback_query(F.data == "confirm:repeat")
+async def confirm_repeat(callback: CallbackQuery, state: FSMContext, bot: Bot) -> None:
+    """Пользователь подтвердил повтор уже существующего активного объявления
+    вместо создания дубликата (см. find_own_duplicate в confirm_yes)."""
+    await callback.answer()
+    lang = await get_user_lang(callback.from_user.id)
+    data = await state.get_data()
+    draft_id = data.get("duplicate_draft_id")
+
+    old_id = data.get("bot_msg_id") or callback.message.message_id
+
+    if not draft_id:
+        await replace_bot_msg(bot, callback.message.chat.id, old_id, t(lang, "data_lost_restart"))
+        await state.clear()
+        return
+
+    ok = await republish_draft(bot, int(draft_id))
+    await state.clear()
+
+    if ok:
+        await replace_bot_msg(bot, callback.message.chat.id, old_id, t(lang, "ad_repeated"))
+    else:
+        await replace_bot_msg(bot, callback.message.chat.id, old_id, t(lang, "ad_repeat_failed"))
 
 
 # ── Back navigation ────────────────────────────────────────────────────────────
@@ -2389,16 +2755,7 @@ async def go_back(callback: CallbackQuery, state: FSMContext, bot: Bot) -> None:
     elif prev == "seeker:origin":
         await render_seeker_origin(bot, chat_id, state, lang, old_id)
     elif prev == "seeker:dest":
-        await state.set_state(Form.seeker_dest)
-        await push_screen(state, "seeker:dest")
-        origin = data.get("seeker_origin")
-        sent = await replace_bot_msg(
-            bot, chat_id, old_id,
-            t(lang, "seeker_from_confirmed", city=esc(city_name(lang, origin))) if origin
-            else t(lang, "seeker_city_to"),
-            markup=kb_cities(lang, "sdest", exclude=origin),
-        )
-        await state.update_data(bot_msg_id=sent.message_id)
+        await render_seeker_dest_screen(bot, chat_id, state, lang, old_id)
     elif prev == "seeker:days":
         await render_seeker_days(bot, chat_id, state, lang, old_id)
     elif prev == "seeker:cargo":

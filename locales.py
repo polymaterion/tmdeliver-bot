@@ -15,12 +15,12 @@
 
 Города хранятся и передаются между функциями как канонический русский текст
 (ключ) — это то, что уходит в БД и в итоговый пост. Для отображения на кнопках
-и в превью используется CITY_NAMES[lang][канонiчeский_город] через city_name().
+и в превью используется ANY_CITY_NAMES[lang][канонiчeский_город] через city_name().
 Если для города нет перевода на нужный язык — используется русский оригинал.
 
 Как добавить новый язык:
   1. Скопируй блок "ru" целиком в TEXTS, переведи все строки.
-  2. Скопируй блок "ru" в CITY_NAMES, переведи названия городов.
+  2. Скопируй блок "ru" в ANY_CITY_NAMES, переведи названия городов.
   3. Добавь новый языковой код в LANGUAGES (например "en").
   4. Добавь кнопку выбора в kb_language() в main.py.
 
@@ -47,26 +47,72 @@ DEFAULT_LANG = "ru"
 # Названия городов — ключ везде канонический русский (как в CITIES в main.py,
 # как в БД, как в итоговом посте канала). Значение — как показать на языке lang.
 # ═══════════════════════════════════════════════════════════════════════════
-CITY_NAMES: dict[str, dict[str, str]] = {
-    "ru": {
-        "Москва":          "Москва",
-        "Санкт-Петербург": "Санкт-Петербург",
-        "Казань":          "Казань",
-        "Ашхабад":         "Ашхабад",
-        "Туркменабад":     "Туркменабад",
-        "Дашогуз":         "Дашогуз",
-        "Мары":            "Мары",
-    },
-    "tk": {
-        "Москва":          "Moskwa",
-        "Санкт-Петербург": "Sankt-Peterburg",
-        "Казань":          "Kazan",
-        "Ашхабад":         "Aşgabat",
-        "Туркменабад":     "Türkmenabat",
-        "Дашогуз":         "Daşoguz",
-        "Мары":            "Mary",
-    },
-}
+# ═══════════════════════════════════════════════════════════════════════════
+# Справочник городов — загружается из cities.json (редактируемый вручную файл
+# рядом с этим скриптом). Формат файла и инструкция — в самом cities.json
+# (ключ "_readme"). Правка применяется только при следующем запуске бота
+# (docker compose restart bot), файл не перечитывается на лету.
+#
+# ANY_CITY_NAMES: dict[lang][канонический_русский_город] = локализованное имя.
+# Используется и для 10 кнопок быстрого выбора (popular=true в JSON, первые
+# 10 по порядку появления в файле — см. POPULAR_CITIES), и для ручного ввода
+# ("Другой город" → нечёткий поиск по этому же словарю, см. find_city_match
+# в main.py).
+# ═══════════════════════════════════════════════════════════════════════════
+import json as _json
+import logging as _logging
+import os as _os
+
+_logger = _logging.getLogger(__name__)
+_CITIES_JSON_PATH = _os.path.join(_os.path.dirname(__file__), "cities.json")
+
+
+def _load_cities_from_json() -> tuple[dict[str, dict[str, str]], list[str]]:
+    """
+    Читает cities.json и строит (ANY_CITY_NAMES, POPULAR_CITIES).
+    Если файл отсутствует или битый — бот не должен молча остаться без
+    городов вообще, поэтому при ошибке логируем и поднимаем исключение:
+    лучше явный сбой при старте, чем тихо неработающий выбор маршрута.
+    """
+    with open(_CITIES_JSON_PATH, encoding="utf-8") as f:
+        data = _json.load(f)
+
+    any_city_names: dict[str, dict[str, str]] = {"ru": {}, "tk": {}}
+    popular: list[str] = []
+
+    for country in data["countries"]:
+        for city in country["cities"]:
+            canonical = city["ru"]
+            any_city_names["ru"][canonical] = canonical
+            any_city_names["tk"][canonical] = city.get("tk") or canonical
+            if city.get("popular"):
+                popular.append(canonical)
+
+    if not popular:
+        _logger.warning(
+            "cities.json: ни один город не помечен popular=true — "
+            "кнопки быстрого выбора будут пустыми, доступен только "
+            "ручной ввод города."
+        )
+    elif len(popular) > 10:
+        _logger.warning(
+            "cities.json: помечено popular=true городов больше 10 (%d) — "
+            "используются только первые 10 по порядку в файле.",
+            len(popular),
+        )
+        popular = popular[:10]
+
+    return any_city_names, popular
+
+
+try:
+    ANY_CITY_NAMES, POPULAR_CITIES = _load_cities_from_json()
+except (FileNotFoundError, _json.JSONDecodeError, KeyError) as _e:
+    _logger.critical("Не удалось загрузить cities.json: %s", _e)
+    raise RuntimeError(
+        f"cities.json отсутствует или повреждён ({_e}). "
+        f"Проверь файл {_CITIES_JSON_PATH} — он должен лежать рядом с main.py."
+    ) from _e
 
 
 def city_name(lang: Optional[str], city: str) -> str:
@@ -76,10 +122,12 @@ def city_name(lang: Optional[str], city: str) -> str:
     гарантированно русский текст, например для итогового поста в канале).
     ВАЖНО: сам город как значение для БД/итогового поста всегда остаётся
     каноническим русским — city_name() используется ТОЛЬКО для вывода на экран.
+    Работает для любого города из ANY_CITY_NAMES, включая введённые вручную —
+    если перевода на нужный язык нет, возвращается исходное написание.
     """
     if lang is None:
         return city
-    return CITY_NAMES.get(lang, {}).get(city) or CITY_NAMES[DEFAULT_LANG].get(city, city)
+    return ANY_CITY_NAMES.get(lang, {}).get(city) or ANY_CITY_NAMES[DEFAULT_LANG].get(city, city)
 
 
 TEXTS: dict[str, dict[str, str]] = {
@@ -115,6 +163,13 @@ TEXTS: dict[str, dict[str, str]] = {
         "route_so_far":        "\n\nМаршрут: {route}",
         "city_already_used":   "⚠️ Этот город уже стоит перед этим. Выберите другой.",
         "route_confirmed":     "✅ Маршрут: <b>{route}</b>\n\n🗓 Укажите дату поездки.\n\nНапример:\n<code>{example}</code>",
+
+        # ── Ручной ввод города ("Другой город") ─────────────────────────────
+        "city_pick_hint":      "Нет нужного города среди кнопок? Напишите его название вручную.",
+        "btn_other_city":      "✏️ Другой город",
+        "ask_custom_city":     "Напишите название города:",
+        "city_not_found":      "😕 Не нашёл такой город. Попробуйте написать иначе или выберите из списка кнопкой «Назад».",
+        "city_suggestions":    "Возможно, вы имели в виду один из этих городов?",
 
         # ── Дата ──────────────────────────────────────────────────────────
         "date_bad_format":     "❌ Неверный формат. Напишите дату так:\n<code>{example}</code>",
@@ -182,6 +237,17 @@ TEXTS: dict[str, dict[str, str]] = {
         "data_lost_restart":    "Данные потерялись. Начните заново.",
         "ad_sent_for_review":   "✅ Объявление отправлено на публикацию.",
         "ad_rejected":          "❌ Объявление не прошло модерацию.",
+
+        # ── Защита от повторных объявлений ──────────────────────────────────
+        "duplicate_found": (
+            "🔁 У вас уже есть точно такое же активное объявление — тот же "
+            "маршрут, дата и контакты.\n\n"
+            "Вместо создания дубликата можно просто повторить (переопубликовать) "
+            "уже существующее объявление — оно снова окажется свежим в канале."
+        ),
+        "btn_repeat_ad":        "🔁 Повторить объявление",
+        "ad_repeated":          "✅ Объявление повторно опубликовано.",
+        "ad_repeat_failed":     "❌ Не получилось повторить объявление. Попробуйте ещё раз позже.",
         "ad_published_thanks": (
             "🎉 Ваше объявление опубликовано.\n\n"
             "Хотите оставить отзыв? Может есть предложения или замечания? "
@@ -246,6 +312,13 @@ TEXTS: dict[str, dict[str, str]] = {
         "city_already_used":   "⚠️ Bu şäher eýýäm ondan öň bar. Başga saýlaň.",
         "route_confirmed":     "✅ Ugur: <b>{route}</b>\n\n🗓 Ugraýan seneňizi görkeziň.\n\nMysal üçin:\n<code>{example}</code>",
 
+        # ── Şäheri elden ýazmak ("Başga şäher") ─────────────────────────────
+        "city_pick_hint":      "Gerekli şäher düwmeleriň arasynda ýokmy? Adyny elde ýazyň.",
+        "btn_other_city":      "✏️ Başga şäher",
+        "ask_custom_city":     "Şäheriň adyny ýazyň:",
+        "city_not_found":      "😕 Beýle şäher tapylmady. Başgaça ýazyp görüň ýa-da «Yza» düwmesi bilen sanawdan saýlaň.",
+        "city_suggestions":    "Belki, şu şäherleriň birini göz öňünde tutdunyz?",
+
         "date_bad_format":     "❌ Nädogry format. Senäni şeýle ýazyň:\n<code>{example}</code>",
         "date_invalid":        "❌ Nädogry sene. Güni we aýy barlaň.",
         "date_too_early":      "❌ Sene ertirden ir bolmaly däl.",
@@ -304,6 +377,16 @@ TEXTS: dict[str, dict[str, str]] = {
         "data_lost_restart":    "Maglumatlar ýitdi. Täzeden başlaň.",
         "ad_sent_for_review":   "✅ Bildiriş barlaga iberildi.",
         "ad_rejected":          "❌ Bildiriş barlagdan geçmedi.",
+
+        # ── Gaýtalanýan bildirişlerden goragy ────────────────────────────────
+        "duplicate_found": (
+            "🔁 Sizde eýýäm şeýle bildiriş bar — şol bir ugur, sene we habarlaşmak üçin maglumatlar.\n\n"
+            "Täzeden döretmegiň deregine, bar bolan bildirişi täzeden çap edip bilersiňiz — "
+            "ol ýene-de kanalda täze bolar."
+        ),
+        "btn_repeat_ad":        "🔁 Bildirişi gaýtala",
+        "ad_repeated":          "✅ Bildiriş täzeden çap edildi.",
+        "ad_repeat_failed":     "❌ Bildirişi gaýtalamak başartmady. Birazdan gaýtadan synanyşyň.",
         "ad_published_thanks": (
             "🎉 Bildirişiňiz kanala goýuldy.\n\n"
             "Pikir bildirmek isleýärsiňizmi? Teklip ýa-da bellik bar bolsa, "

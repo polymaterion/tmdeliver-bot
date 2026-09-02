@@ -73,9 +73,12 @@ EMOJIS: dict[str, EmojiDef] = {
     "group":          EmojiDef("👥"),    # групповые чаты / пользователи
     "outbox":         EmojiDef("📤"),    # рассылка началась
 
-    # ── Флаги стран (для маршрутов) ───────────────────────────────────────
-    "flag_russia":        EmojiDef("🇷🇺"),
-    "flag_turkmenistan":  EmojiDef("🇹🇲"),
+    # Флаги стран регистрируются здесь автоматически при импорте модуля —
+    # см. _build_city_flag_key_map() ниже, читает cities.json. Чтобы задать
+    # премиум-версию флага конкретной страны, найди сгенерированный ключ вида
+    # "flag_<название_страны_из_cities.json>" в рантайме (EMOJIS.keys()) и
+    # добавь для него запись EMOJIS["flag_..."] = EmojiDef(fallback, premium_id)
+    # уже после определения EMOJIS — например, в конце этого файла.
 }
 
 
@@ -112,17 +115,43 @@ def entity_emoji(builder, key: str):
     return builder.t(d.fallback)
 
 
-_CITY_TO_FLAG_KEY: dict[str, str] = {
-    "Москва":          "flag_russia",
-    "Санкт-Петербург": "flag_russia",
-    "Казань":          "flag_russia",
-    "Ашхабад":         "flag_turkmenistan",
-    "Туркменабад":     "flag_turkmenistan",
-    "Дашогуз":         "flag_turkmenistan",
-    "Мары":            "flag_turkmenistan",
-    "Туркменбаши":     "flag_turkmenistan",
-    "Балканабад":      "flag_turkmenistan",
-}
+import json as _json
+import logging as _logging
+import os as _os
+
+_logger = _logging.getLogger(__name__)
+_CITIES_JSON_PATH = _os.path.join(_os.path.dirname(__file__), "cities.json")
+
+
+def _build_city_flag_key_map() -> dict[str, str]:
+    """
+    Строит {город -> ключ_эмодзи} и регистрирует сами флаги в EMOJIS, читая
+    cities.json напрямую (не импортируя locales.py, чтобы избежать циклической
+    зависимости — оба модуля независимо читают один и тот же файл).
+
+    Ключ эмодзи для флага страны генерируется как "flag_<name_ru>" — так он
+    попадает в общий реестр EMOJIS и получает всю существующую инфраструктуру
+    (fallback unicode + опциональный premium_id, который можно проставить
+    вручную в EMOJIS ниже, если понадобится премиум-версия флага).
+    """
+    try:
+        with open(_CITIES_JSON_PATH, encoding="utf-8") as f:
+            data = _json.load(f)
+    except (FileNotFoundError, _json.JSONDecodeError) as e:
+        _logger.critical("emojis.py: не удалось загрузить cities.json: %s", e)
+        raise RuntimeError(f"cities.json отсутствует или повреждён ({e})") from e
+
+    city_to_flag_key: dict[str, str] = {}
+    for country in data["countries"]:
+        flag_key = f"flag_{country['name_ru'].casefold().replace(' ', '_')}"
+        if flag_key not in EMOJIS:
+            EMOJIS[flag_key] = EmojiDef(country["flag"])
+        for city in country["cities"]:
+            city_to_flag_key[city["ru"]] = flag_key
+    return city_to_flag_key
+
+
+_CITY_TO_FLAG_KEY: dict[str, str] = _build_city_flag_key_map()
 
 
 def city_flag(city: str) -> str:
