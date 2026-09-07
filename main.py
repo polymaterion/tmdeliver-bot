@@ -493,35 +493,58 @@ async def create_draft(d: dict[str, Any]) -> int:
         return int(row["id"])
 
 
-async def republish_draft(bot: Bot, draft_id: int) -> bool:
+async def send_repeat_to_moderation(bot: Bot, draft_id: int) -> bool:
     """
-    "Повторяет" уже существующее объявление — используется когда пользователь
-    пытается создать точно такое же объявление (см. find_own_duplicate) и
-    выбирает "Повторить" вместо отказа. Завершает старый пост в канале
-    (зачёркивание + удаление тизеров), затем публикует объявление заново под
-    тем же draft_id — новый пост в канале и новые тизеры в группах, чтобы
-    объявление снова оказалось свежим и наверху ленты.
-    Возвращает True при успехе.
+    "Повтор" уже существующего объявления пользователем (см. find_own_duplicate
+    и confirm:repeat) — раньше эта функция публиковала объявление в канал
+    НАПРЯМУЮ, в обход модерации. Это было ошибкой: пользователь не должен
+    иметь возможность самостоятельно опубликовать что-либо в канал без
+    решения админа, точно так же, как и при обычном создании объявления.
+
+    Старый пост в канале НЕ трогается вообще — не зачёркивается и не
+    затирается — он истечёт сам по расписанию, когда пройдёт указанная в нём
+    дата вылета (обычный планировщик, get_to_expire). Вместо переиспользования
+    старой записи создаётся НОВАЯ заявка (create_draft) с теми же данными и
+    отправляется на обычную модерацию (уведомление ADMIN_IDS с кнопками
+    Опубликовать/Отложить/Отклонить) — старый draft остаётся как есть, живёт
+    своей жизнью независимо от исхода повтора.
+    Возвращает True при успехе (заявка отправлена на модерацию).
     """
-    row = await get_draft(draft_id)
-    if row is None:
+    old_row = await get_draft(draft_id)
+    if old_row is None:
         return False
 
-    await _expire_channel_post(bot, row)
+    cities = parse_route(old_row)
+    new_draft_id = await create_draft({
+        "user_id":         int(old_row["user_id"]),
+        "tg_username":     old_row["tg_username"],
+        "custom_username": old_row["custom_username"],
+        "full_name":       old_row["full_name"] or "Пользователь",
+        "cities":          cities,
+        "travel_date":     str(old_row["travel_date"]),
+        "cargo":           str(old_row["cargo"]),
+        "phone":           str(old_row["phone"] or ""),
+        "ad_type":         old_row["ad_type"] or "carrier",
+    })
 
-    row = await get_draft(draft_id)  # перечитываем — expired/channel_msg_id могли обновиться
-    channel_msg_id = await _do_publish(bot, row)
-    if not channel_msg_id:
-        return False
+    admin_text = build_admin_notification(
+        draft_id=new_draft_id,
+        full_name=old_row["full_name"] or "Пользователь",
+        user_id=int(old_row["user_id"]),
+        tg_username=old_row["tg_username"],
+        cities=cities,
+        travel_date=str(old_row["travel_date"]),
+        cargo=str(old_row["cargo"]),
+        phone=str(old_row["phone"] or ""),
+        custom_username=old_row["custom_username"],
+        ad_type=old_row["ad_type"] or "carrier",
+    )
+    for admin_id in ADMIN_IDS:
+        try:
+            await _send(bot, admin_id, admin_text, markup=kb_admin(new_draft_id))
+        except Exception as e:
+            logger.exception("Admin notify failed (repeat, draft %s) %s: %s", new_draft_id, admin_id, e)
 
-    async with pool().acquire() as conn:
-        await conn.execute(
-            "UPDATE drafts SET published=TRUE, expired=FALSE, channel_msg_id=$1 WHERE id=$2",
-            channel_msg_id, draft_id,
-        )
-
-    row = await get_draft(draft_id)
-    await _publish_to_groups(bot, row, channel_msg_id)
     return True
 
 
@@ -2670,7 +2693,8 @@ async def confirm_yes(callback: CallbackQuery, state: FSMContext, bot: Bot) -> N
 @router.callback_query(F.data == "confirm:repeat")
 async def confirm_repeat(callback: CallbackQuery, state: FSMContext, bot: Bot) -> None:
     """Пользователь подтвердил повтор уже существующего активного объявления
-    вместо создания дубликата (см. find_own_duplicate в confirm_yes)."""
+    вместо создания дубликата (см. find_own_duplicate в confirm_yes).
+    Повтор идёт на обычную модерацию — не публикуется в канал напрямую."""
     await callback.answer()
     lang = await get_user_lang(callback.from_user.id)
     data = await state.get_data()
@@ -2683,11 +2707,11 @@ async def confirm_repeat(callback: CallbackQuery, state: FSMContext, bot: Bot) -
         await state.clear()
         return
 
-    ok = await republish_draft(bot, int(draft_id))
+    ok = await send_repeat_to_moderation(bot, int(draft_id))
     await state.clear()
 
     if ok:
-        await replace_bot_msg(bot, callback.message.chat.id, old_id, t(lang, "ad_repeated"))
+        await replace_bot_msg(bot, callback.message.chat.id, old_id, t(lang, "ad_sent_for_review"))
     else:
         await replace_bot_msg(bot, callback.message.chat.id, old_id, t(lang, "ad_repeat_failed"))
 
