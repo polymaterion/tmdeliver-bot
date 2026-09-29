@@ -25,6 +25,8 @@ from aiogram.filters import ChatMemberUpdatedFilter, IS_MEMBER, IS_NOT_MEMBER
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 from dotenv import load_dotenv
 
+import billing
+
 from locales import t, LANGUAGES, DEFAULT_LANG, city_name, ANY_CITY_NAMES, POPULAR_CITIES
 from emojis import e, raw, entity_emoji, city_flag, city_flag_entity, EMOJIS
 
@@ -41,6 +43,9 @@ BOOST_URL     = os.getenv("BOOST_URL", "").strip()
 HELP_USERNAME = os.getenv("HELP_USERNAME", "kabulbeg").strip()
 TZ_OFFSET     = int(os.getenv("TZ_OFFSET", "3")) 
 DATABASE_URL  = os.getenv("DATABASE_URL", "").strip()   # PostgreSQL, см. docker-compose.yml
+# Реквизиты для ручной оплаты переводом (меняются в .env без правки кода)
+CARD_NUMBER   = os.getenv("CARD_NUMBER", "").strip()
+CARD_HOLDER   = os.getenv("CARD_HOLDER", "").strip()    # необязательно: имя получателя
 
 if not BOT_TOKEN:
     raise RuntimeError("BOT_TOKEN is missing")
@@ -466,6 +471,9 @@ async def init_db() -> None:
             )
         """)
 
+    billing.configure(TZ_OFFSET)
+    await billing.init_schema(_pool)
+
 
 def pool() -> asyncpg.Pool:
     assert _pool is not None, "DB pool is not initialized — call init_db() first"
@@ -474,23 +482,10 @@ def pool() -> asyncpg.Pool:
 # ── Drafts CRUD ────────────────────────────────────────────────────────────────
 
 async def create_draft(d: dict[str, Any]) -> int:
-    cities = d["cities"]
-    async with pool().acquire() as conn:
-        row = await conn.fetchrow(
-            """
-            INSERT INTO drafts
-                (user_id, tg_username, custom_username, full_name,
-                 origin, destination, route, travel_date, cargo, phone, ad_type)
-            VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)
-            RETURNING id
-            """,
-            d["user_id"], d.get("tg_username"), d.get("custom_username"),
-            d["full_name"], cities[0], cities[-1],
-            json.dumps(cities, ensure_ascii=False),
-            d["travel_date"], d["cargo"], d.get("phone", ""),
-            d.get("ad_type", "carrier"),
-        )
-        return int(row["id"])
+    """Создаёт заявку (status='pending'). Бросает billing.OpenDraftExists, если у
+    пользователя уже есть объявление в активном процессе — проверка в БД, под
+    мьютексом пользователя и частичным UNIQUE-индексом (см. billing.create_draft)."""
+    return await billing.create_draft(pool(), d)
 
 
 async def send_repeat_to_moderation(bot: Bot, draft_id: int) -> bool:
@@ -515,7 +510,8 @@ async def send_repeat_to_moderation(bot: Bot, draft_id: int) -> bool:
         return False
 
     cities = parse_route(old_row)
-    new_draft_id = await create_draft({
+    try:
+        new_draft_id = await create_draft({
         "user_id":         int(old_row["user_id"]),
         "tg_username":     old_row["tg_username"],
         "custom_username": old_row["custom_username"],
@@ -525,7 +521,10 @@ async def send_repeat_to_moderation(bot: Bot, draft_id: int) -> bool:
         "cargo":           str(old_row["cargo"]),
         "phone":           str(old_row["phone"] or ""),
         "ad_type":         old_row["ad_type"] or "carrier",
-    })
+        })
+    except billing.OpenDraftExists:
+        return False
+    new_row = await get_draft(new_draft_id)
 
     admin_text = build_admin_notification(
         draft_id=new_draft_id,
@@ -538,6 +537,7 @@ async def send_repeat_to_moderation(bot: Bot, draft_id: int) -> bool:
         phone=str(old_row["phone"] or ""),
         custom_username=old_row["custom_username"],
         ad_type=old_row["ad_type"] or "carrier",
+        funding=new_row["funding"] if new_row else None,
     )
     for admin_id in ADMIN_IDS:
         try:
@@ -701,7 +701,8 @@ async def get_scheduled_ready() -> list[asyncpg.Record]:
     now = now_local()
     async with pool().acquire() as conn:
         rows = await conn.fetch(
-            "SELECT * FROM drafts WHERE published=FALSE AND scheduled_at IS NOT NULL AND expired=FALSE"
+            "SELECT * FROM drafts WHERE published=FALSE AND scheduled_at IS NOT NULL AND expired=FALSE "
+            "AND status IN ('approved','publish_error')"
         )
     ready = []
     for row in rows:
@@ -1148,15 +1149,19 @@ def build_admin_notification(
     cities: list[str], travel_date: str, cargo: str,
     phone: str, custom_username: Optional[str],
     ad_type: str = "carrier",
+    funding: Optional[str] = None,
 ) -> str:
     uname      = f"@{esc(tg_username)}" if tg_username else "—"
+    fund_line  = ""
+    if funding:
+        fund_line = f"\n💰 Публикация: {'платная' if funding == 'paid' else 'бесплатная'}"
     sep        = "—" * 32
     type_label = f"{e('plane')} Перевозчик" if ad_type == "carrier" else f"{e('search')} Ищу попутчика"
     return (
         f"{e('inbox')} <b>Новое объявление #{draft_id}</b> · {type_label}\n\n"
         f"{e('person')} Пользователь: {esc(full_name)}\n"
         f"{e('id_card')} ID: <code>{user_id}</code>\n"
-        f"📱 Username: {uname}\n\n"
+        f"📱 Username: {uname}{fund_line}\n\n"
         f"{sep}\n\n"
         + build_preview(cities, travel_date, cargo, phone, custom_username, ad_type)
         + f"\n\n{sep}"
@@ -1261,11 +1266,18 @@ def kb_back_only(lang: str) -> InlineKeyboardMarkup:
     return kb_with_back(lang, [])
 
 
-def kb_admin(draft_id: int) -> InlineKeyboardMarkup:
+def kb_admin(draft_id: int, approved: bool = False) -> InlineKeyboardMarkup:
+    """До одобрения — модерация (Одобрить/Отклонить). После — очередь публикации:
+    отдельная кнопка «Опубликовать» (публикация только вручную, по одному объявлению)."""
+    if not approved:
+        return InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text=f"{raw('check')} Одобрить",   callback_data=f"approve:{draft_id}")],
+            [InlineKeyboardButton(text=f"{raw('cross')} Отклонить",  callback_data=f"reject:{draft_id}")],
+        ])
     return InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text=f"{raw('megaphone')} Опубликовать сейчас", callback_data=f"publish:{draft_id}")],
-        [InlineKeyboardButton(text=f"{raw('clock')} Отложить",                 callback_data=f"sched:{draft_id}")],
-        [InlineKeyboardButton(text=f"{raw('cross')} Отклонить",                callback_data=f"reject:{draft_id}")],
+        [InlineKeyboardButton(text=f"📢 Опубликовать",                 callback_data=f"publish:{draft_id}")],
+        [InlineKeyboardButton(text=f"{raw('clock')} Отложить",         callback_data=f"sched:{draft_id}")],
+        [InlineKeyboardButton(text=f"{raw('cross')} Отклонить",        callback_data=f"reject:{draft_id}")],
     ])
 
 
@@ -1319,9 +1331,10 @@ def kb_after_feedback(lang: str) -> InlineKeyboardMarkup:
 
 
 def kb_create(lang: str) -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup(inline_keyboard=[[
-        InlineKeyboardButton(text=t(lang, "btn_create_ad"), callback_data="create_ad"),
-    ]])
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text=t(lang, "btn_create_ad"), callback_data="create_ad")],
+        [InlineKeyboardButton(text=t(lang, "btn_buy"),       callback_data="buy:menu")],
+    ])
 
 
 def kb_broadcast_confirm() -> InlineKeyboardMarkup:
@@ -1475,6 +1488,12 @@ def kb_with_back(lang: str, rows: list[list[InlineKeyboardButton]]) -> InlineKey
 
 async def _do_publish(bot: Bot, draft: asyncpg.Record) -> Optional[int]:
     """Публикует пост в канал. Возвращает channel_msg_id или None при ошибке."""
+    msg_id, _ = await _do_publish_checked(bot, draft)
+    return msg_id
+
+
+async def _do_publish_checked(bot: Bot, draft: asyncpg.Record) -> tuple[Optional[int], str]:
+    """Как _do_publish, но возвращает и текст ошибки: (channel_msg_id, "") | (None, error)."""
     try:
         cities  = parse_route(draft)
         ad_type = draft["ad_type"] or "carrier"
@@ -1492,18 +1511,21 @@ async def _do_publish(bot: Bot, draft: asyncpg.Record) -> Optional[int]:
             entities=entities,
             disable_web_page_preview=True,
         )
-        return msg.message_id
+        return msg.message_id, ""
     except Exception as e:
         logger.exception("Publish to channel failed (draft %s): %s", draft["id"], e)
-        return None
+        return None, f"{type(e).__name__}: {e}"
 
 
-async def _notify_user_published(bot: Bot, user_id: int) -> None:
+async def _notify_user_published(bot: Bot, user_id: int, balance_after: Optional[int] = None) -> None:
     lang = await get_user_lang(user_id)
     try:
+        text = t(lang, "ad_published_thanks")
+        if balance_after is not None:
+            text += "\n\n" + t(lang, "ad_published_paid_note", balance=balance_after)
         await _send(
             bot, user_id,
-            t(lang, "ad_published_thanks"),
+            text,
             markup=kb_after_publish(lang),
         )
     except Exception as e:
@@ -1603,6 +1625,104 @@ async def _expire_channel_post(bot: Bot, row: asyncpg.Record) -> None:
 
 # ── Background scheduler ──────────────────────────────────────────────────────
 
+# ── Публикация с биллингом: claim → Telegram → finalize/release ───────────────
+
+async def clear_scheduled(draft_id: int) -> None:
+    async with pool().acquire() as conn:
+        await conn.execute("UPDATE drafts SET scheduled_at=NULL WHERE id=$1", draft_id)
+
+
+async def _notify_admins(bot: Bot, text: str, markup=None, exclude: Optional[int] = None) -> None:
+    for admin_id in ADMIN_IDS:
+        if exclude is not None and admin_id == exclude:
+            continue
+        try:
+            await _send(bot, admin_id, text, markup=markup)
+        except Exception as ex:
+            logger.warning("Admin notify failed %s: %s", admin_id, ex)
+
+
+def _cooldown_text(claim: "billing.ClaimResult") -> str:
+    return (
+        "⏳ Пока нельзя опубликовать следующее объявление этого пользователя.\n\n"
+        f"Последняя публикация: {billing.fmt_local(claim.last_at)}\n"
+        f"Следующая публикация доступна: {billing.fmt_local(claim.next_at)}"
+    )
+
+
+def _claim_fail_text(claim: "billing.ClaimResult") -> str:
+    if claim.code == "cooldown":
+        return _cooldown_text(claim)
+    return {
+        "not_found":         "Заявка не найдена.",
+        "not_approved":      "Объявление не одобрено — сначала нажмите «Одобрить».",
+        "in_progress":       "Публикация уже выполняется.",
+        "already_published": "Уже опубликовано.",
+        "rejected":          "Объявление отклонено.",
+        "cancelled":         "Объявление отменено.",
+        "trip_passed":       "Дата поездки уже прошла — публикация невозможна.",
+        "other_publishing":  "У этого пользователя сейчас уже публикуется другое объявление.",
+        "no_free":           "Бесплатная публикация пользователя занята активным объявлением, а оплата не выбрана.",
+        "no_balance":        "Платная публикация: оплата не подтверждена или на балансе нет публикаций.",
+    }.get(claim.code, f"Публикация невозможна ({claim.code}).")
+
+
+async def _execute_publication(bot: Bot, draft_id: int) -> dict[str, Any]:
+    """
+    Единственный путь публикации объявления в канал (ручной и отложенной).
+      1. billing.claim_publication — все проверки + атомарный захват (защита от гонок);
+      2. отправка в Telegram (вне транзакции);
+      3. ошибка → billing.release_publication (ничего не списано, повтор возможен);
+         успех → billing.finalize_publication (списание ровно 1 платной, время публикации).
+    Возвращает {'status': 'published'|'claim_failed'|'telegram_error'|'finalize_failed', ...}.
+    """
+    claim = await billing.claim_publication(pool(), draft_id)
+    if not claim.ok:
+        return {"status": "claim_failed", "claim": claim}
+    draft = claim.draft
+
+    channel_msg_id, err = await _do_publish_checked(bot, draft)
+    if not channel_msg_id:
+        await billing.release_publication(pool(), draft_id, err)
+        await _notify_admins(bot, f"❌ Ошибка публикации #{draft_id}: {esc(err)}\n"
+                                  "Публикация не списана, объявление не считается опубликованным.")
+        return {"status": "telegram_error", "err": err, "draft": draft}
+
+    fin = None
+    for attempt in range(3):
+        try:
+            fin = await billing.finalize_publication(pool(), draft_id, channel_msg_id)
+            break
+        except Exception as ex:
+            logger.exception("finalize attempt %s failed (draft %s): %s", attempt + 1, draft_id, ex)
+            await asyncio.sleep(1 + attempt)
+    if fin is None:
+        logger.critical("Draft %s is in channel (msg %s) but DB not updated", draft_id, channel_msg_id)
+        await _notify_admins(
+            bot, f"🚨 Объявление #{draft_id} УЖЕ размещено в канале (сообщение {channel_msg_id}), но не удалось "
+                 "обновить базу. НЕ публикуйте повторно — проверьте состояние вручную.")
+        return {"status": "finalize_failed", "err": "db", "draft": draft}
+    if fin["result"] == "published_unbilled":
+        await _notify_admins(bot, f"🚨 Объявление #{draft_id} опубликовано, но списать публикацию не удалось "
+                                  "(баланс изменился). Проверьте баланс пользователя.")
+
+    fresh = await get_draft(draft_id)
+    try:
+        await _publish_to_groups(bot, fresh, channel_msg_id)
+    except Exception as ex:
+        logger.exception("groups publish failed (draft %s): %s", draft_id, ex)
+    if draft["pending_chat_id"] and draft["pending_msg_id"]:
+        await _delete(bot, draft["pending_chat_id"], draft["pending_msg_id"])
+    await _notify_user_published(
+        bot, int(draft["user_id"]),
+        balance_after=fin.get("balance") if fin.get("funding") == "paid" else None,
+    )
+    return {"status": "published", "fin": fin, "draft": draft, "channel_msg_id": channel_msg_id}
+
+
+_sched_warned: set[int] = set()
+
+
 async def scheduler_loop(bot: Bot) -> None:
     """
     Каждые 60 секунд:
@@ -1613,20 +1733,42 @@ async def scheduler_loop(bot: Bot) -> None:
     while True:
         await asyncio.sleep(60)
 
-        # ── Публикуем запланированные ─────────────────────────────────────────
+        # ── Публикуем запланированные (только одобренные; через тот же claim →
+        #    Telegram → finalize, что и ручная публикация: все проверки п.7 ТЗ) ──
         for row in await get_scheduled_ready():
             draft_id = int(row["id"])
-            logger.info("Scheduler: publishing draft %s", draft_id)
-
-            channel_msg_id = await _do_publish(bot, row)
-            if channel_msg_id:
-                await mark_published(draft_id, channel_msg_id)
-                await _publish_to_groups(bot, row, channel_msg_id)
-
-                if row["pending_chat_id"] and row["pending_msg_id"]:
-                    await _delete(bot, row["pending_chat_id"], row["pending_msg_id"])
-
-                await _notify_user_published(bot, int(row["user_id"]))
+            try:
+                logger.info("Scheduler: publishing draft %s", draft_id)
+                res = await _execute_publication(bot, draft_id)
+                if res["status"] == "published":
+                    _sched_warned.discard(draft_id)
+                    await _notify_admins(bot, f"✅ Отложенное объявление #{draft_id} опубликовано.")
+                    continue
+                if res["status"] == "claim_failed":
+                    claim = res["claim"]
+                    if claim.code == "cooldown":
+                        # остаётся в расписании — опубликуется, как только пройдёт 24 ч
+                        if draft_id not in _sched_warned:
+                            _sched_warned.add(draft_id)
+                            await _notify_admins(
+                                bot, f"⏳ Отложенное объявление #{draft_id} ждёт окончания 24-часового "
+                                     f"ограничения.\n\n" + _cooldown_text(claim))
+                        continue
+                    if claim.code in ("in_progress", "other_publishing"):
+                        continue
+                    await clear_scheduled(draft_id)
+                    await _notify_admins(
+                        bot, f"⚠️ Отложенная публикация #{draft_id} отменена: {_claim_fail_text(claim)}",
+                        markup=kb_admin(draft_id, approved=True) if claim.code in ("no_balance", "no_free") else None)
+                    continue
+                # ошибка Telegram / БД: баланс не тронут, расписание снимаем, чтобы не спамить
+                await clear_scheduled(draft_id)
+                await _notify_admins(
+                    bot, f"❌ Ошибка отложенной публикации #{draft_id}: {esc(res.get('err', ''))}\n"
+                         "Баланс не списан. Повторите вручную.",
+                    markup=kb_admin(draft_id, approved=True))
+            except Exception as ex:
+                logger.exception("Scheduler publish crashed (draft %s): %s", draft_id, ex)
 
         # ── Зачёркиваем истёкшие в канале + удаляем тизеры в группах ──────────
         for row in await get_to_expire():
@@ -1656,6 +1798,59 @@ def _city_step_text(lang: str, step: int, total: int, cities_so_far: list[str]) 
 # ── Router ────────────────────────────────────────────────────────────────────
 
 router = Router()
+
+
+# ── Приём чека (регистрируется ПЕРВЫМ, чтобы фото/файл не перехватили FSM-хендлеры) ──
+
+async def _receipt_filter(message: Message, state: FSMContext) -> bool:
+    if message.from_user is None or message.chat.type != "private":
+        return False
+    if not (message.photo or message.document):
+        return False
+    cur = await state.get_state()
+    if cur and cur.startswith("BroadcastForm"):
+        return False
+    return await billing.find_receipt_target(pool(), message.from_user.id) is not None
+
+
+@router.message(_receipt_filter)
+async def receive_receipt(message: Message, bot: Bot) -> None:
+    """Чек привязывается к заявке на оплату, пересылается админам с кнопками
+    «Подтвердить / Отклонить», заявка переходит в receipt_received."""
+    user = message.from_user
+    lang = await get_user_lang(user.id)
+    target = await billing.find_receipt_target(pool(), user.id)
+    if target is None:
+        return
+    if message.photo:
+        ftype, fid = "photo", message.photo[-1].file_id
+    else:
+        ftype, fid = "document", message.document.file_id
+    res = await billing.attach_receipt(pool(), int(target["id"]), user.id, ftype, fid,
+                                       message.chat.id, message.message_id)
+    if res is None:
+        return
+    p, _first = res
+    await message.reply(t(lang, "pay_receipt_received", id=p["id"]))
+
+    uname = f"@{esc(user.username)}" if user.username else "—"
+    caption = (
+        f"🧾 <b>Чек по заявке #{p['id']}</b> · ожидает проверки оплаты\n\n"
+        f"{e('person')} {esc(user.full_name or 'Пользователь')} ({uname})\n"
+        f"{e('id_card')} ID: <code>{user.id}</code>\n"
+        f"Пакет: {p['qty']} публикаций\n"
+        f"Сумма: {p['amount']} ₽\n"
+        f"Статус: {PAYMENT_STATUS_RU[p['status']]}"
+    )
+    for admin_id in ADMIN_IDS:
+        try:
+            kw = dict(caption=caption, parse_mode="HTML", reply_markup=kb_pay_admin(int(p["id"])))
+            if ftype == "photo":
+                await bot.send_photo(admin_id, fid, **kw)
+            else:
+                await bot.send_document(admin_id, fid, **kw)
+        except Exception as ex:
+            logger.exception("Receipt forward to admin %s failed: %s", admin_id, ex)
 
 
 # ════════════════════════════════════════════════════════════════════════════
@@ -1920,6 +2115,10 @@ async def create_ad(callback: CallbackQuery, state: FSMContext, bot: Bot) -> Non
     lang = await get_user_lang(callback.from_user.id)
     if not await is_subscribed(bot, callback.from_user.id):
         await callback.answer(t(lang, "subscribe_first"), show_alert=True)
+        return
+
+    if await _block_if_open_draft(bot, callback.message.chat.id, callback.from_user.id, lang,
+                                  callback.message.message_id):
         return
 
     data = await state.get_data()
@@ -2641,6 +2840,11 @@ async def confirm_yes(callback: CallbackQuery, state: FSMContext, bot: Bot) -> N
     user      = callback.from_user
     full_name = user.full_name or "Пользователь"
 
+    # Защита от повторной отправки: проверка по состоянию заявок в БД (не по UI).
+    if await _block_if_open_draft(bot, callback.message.chat.id, user.id, lang,
+                                  data.get("bot_msg_id") or callback.message.message_id):
+        return
+
     duplicate = await find_own_duplicate(user.id, ad_type, cities, travel_d, phone, cuname)
     if duplicate is not None:
         await state.update_data(duplicate_draft_id=int(duplicate["id"]))
@@ -2655,17 +2859,24 @@ async def confirm_yes(callback: CallbackQuery, state: FSMContext, bot: Bot) -> N
         )
         return
 
-    draft_id = await create_draft({
-        "user_id":         user.id,
-        "tg_username":     user.username,
-        "custom_username": cuname,
-        "full_name":       full_name,
-        "cities":          cities,
-        "travel_date":     travel_d,
-        "cargo":           cargo,
-        "phone":           phone,
-        "ad_type":         ad_type,
-    })
+    try:
+        draft_id = await create_draft({
+            "user_id":         user.id,
+            "tg_username":     user.username,
+            "custom_username": cuname,
+            "full_name":       full_name,
+            "cities":          cities,
+            "travel_date":     travel_d,
+            "cargo":           cargo,
+            "phone":           phone,
+            "ad_type":         ad_type,
+        })
+    except billing.OpenDraftExists:
+        # гонка / повторное нажатие: заявка уже создана параллельным запросом
+        await _show_open_draft_block(bot, callback.message.chat.id, lang,
+                                     data.get("bot_msg_id") or callback.message.message_id)
+        return
+    new_row = await get_draft(draft_id)
 
     admin_text = build_admin_notification(
         draft_id=draft_id,
@@ -2673,6 +2884,7 @@ async def confirm_yes(callback: CallbackQuery, state: FSMContext, bot: Bot) -> N
         cities=cities, travel_date=travel_d,
         cargo=cargo, phone=phone,
         custom_username=cuname, ad_type=ad_type,
+        funding=new_row["funding"],
     )
 
     for admin_id in ADMIN_IDS:
@@ -2689,6 +2901,17 @@ async def confirm_yes(callback: CallbackQuery, state: FSMContext, bot: Bot) -> N
     )
     await save_pending_msg(draft_id, callback.message.chat.id, sent.message_id)
 
+    # Платная публикация без средств на балансе → сообщаем, что заявка ждёт оплаты
+    if new_row["funding"] == "paid":
+        bal, reserved = await billing.get_balance(pool(), user.id)
+        if bal - reserved < 1:
+            try:
+                await _send(bot, callback.message.chat.id, t(lang, "ad_waiting_payment_user"),
+                            markup=InlineKeyboardMarkup(inline_keyboard=[[
+                                InlineKeyboardButton(text=t(lang, "btn_buy"), callback_data="buy:menu")]]))
+            except Exception as ex:
+                logger.warning("waiting-payment notice failed: %s", ex)
+
 
 @router.callback_query(F.data == "confirm:repeat")
 async def confirm_repeat(callback: CallbackQuery, state: FSMContext, bot: Bot) -> None:
@@ -2701,6 +2924,9 @@ async def confirm_repeat(callback: CallbackQuery, state: FSMContext, bot: Bot) -
     draft_id = data.get("duplicate_draft_id")
 
     old_id = data.get("bot_msg_id") or callback.message.message_id
+
+    if await _block_if_open_draft(bot, callback.message.chat.id, callback.from_user.id, lang, old_id):
+        return
 
     if not draft_id:
         await replace_bot_msg(bot, callback.message.chat.id, old_id, t(lang, "data_lost_restart"))
@@ -2817,6 +3043,9 @@ async def sched_show_dates(callback: CallbackQuery, bot: Bot) -> None:
     if not draft:
         await callback.answer("Заявка не найдена", show_alert=True)
         return
+    if draft["status"] not in billing.RETRIABLE_STATUSES:
+        await callback.answer("Отложить можно только одобренное объявление", show_alert=True)
+        return
     try:
         await callback.message.edit_reply_markup(reply_markup=kb_schedule_dates(draft_id))
     except Exception:
@@ -2859,6 +3088,9 @@ async def sched_pick_time(callback: CallbackQuery, bot: Bot) -> None:
     if draft["published"]:
         await callback.answer("Уже опубликовано", show_alert=True)
         return
+    if draft["status"] not in billing.RETRIABLE_STATUSES:
+        await callback.answer("Отложить можно только одобренное объявление", show_alert=True)
+        return
 
     chosen_date  = local_date() + timedelta(days=day_offset)
     scheduled_at = f"{chosen_date.strftime('%d.%m.%Y')} {hour:02d}:00"
@@ -2876,12 +3108,45 @@ async def sched_pick_time(callback: CallbackQuery, bot: Bot) -> None:
         pass
 
 
+@router.callback_query(F.data.startswith("approve:"))
+async def approve_draft_cb(callback: CallbackQuery, bot: Bot) -> None:
+    """Модерация: pending → approved. Объявление НЕ публикуется — только попадает
+    в очередь, откуда админ публикует его отдельной кнопкой «📢 Опубликовать»."""
+    if callback.from_user.id not in ADMIN_IDS:
+        await callback.answer("Нет доступа", show_alert=True)
+        return
+    draft_id = int(callback.data.split(":")[1])
+    row = await billing.approve_draft(pool(), draft_id)
+    if row is None:
+        d = await get_draft(draft_id)
+        await callback.answer(f"Нельзя одобрить (статус: {d['status'] if d else 'не найдено'})", show_alert=True)
+        return
+    await callback.answer("Одобрено")
+    try:
+        await callback.message.edit_reply_markup(reply_markup=kb_admin(draft_id, approved=True))
+    except Exception:
+        pass
+    status_line = await _readiness_line(row)
+    await callback.message.reply(f"{raw('check')} Объявление #{draft_id} одобрено.\n{status_line}\n"
+                                 "Автоматически не публикуется — нажмите «📢 Опубликовать».")
+    uid = int(row["user_id"])
+    lang = await get_user_lang(uid)
+    try:
+        await _send(bot, uid, t(lang, "ad_approved_user"))
+        bal, reserved = await billing.get_balance(pool(), uid)
+        if row["funding"] == "paid" and bal - reserved < 1:
+            await _send(bot, uid, t(lang, "ad_waiting_payment_user"),
+                        markup=InlineKeyboardMarkup(inline_keyboard=[[
+                            InlineKeyboardButton(text=t(lang, "btn_buy"), callback_data="buy:menu")]]))
+    except Exception as ex:
+        logger.warning("Cannot notify user %s about approval: %s", uid, ex)
+
+
 @router.callback_query(F.data.startswith("reject:"))
 async def reject_draft(callback: CallbackQuery, bot: Bot) -> None:
     if callback.from_user.id not in ADMIN_IDS:
         await callback.answer("Нет доступа", show_alert=True)
         return
-    await callback.answer()
 
     draft_id = int(callback.data.split(":")[1])
     draft    = await get_draft(draft_id)
@@ -2889,12 +3154,24 @@ async def reject_draft(callback: CallbackQuery, bot: Bot) -> None:
         await callback.answer("Заявка не найдена", show_alert=True)
         return
 
+    # Атомарный переход в rejected. Баланс не трогаем: платные публикации резервируются
+    # только на время самой отправки в Telegram, поэтому у отклонённого объявления
+    # ничего не списано и ничего возвращать не нужно — купленное остаётся на балансе.
+    row = await billing.reject_draft(pool(), draft_id)
+    if row is None:
+        await callback.answer(f"Нельзя отклонить (статус: {draft['status']})", show_alert=True)
+        return
+    await callback.answer()
+
     if draft["pending_chat_id"] and draft["pending_msg_id"]:
         await _delete(bot, draft["pending_chat_id"], draft["pending_msg_id"])
 
     try:
         user_lang = await get_user_lang(int(draft["user_id"]))
-        await _send(bot, int(draft["user_id"]), t(user_lang, "ad_rejected"), markup=kb_create(user_lang))
+        text = t(user_lang, "ad_rejected")
+        if draft["funding"] == "paid":
+            text += "\n\n" + t(user_lang, "ad_rejected_paid_note")
+        await _send(bot, int(draft["user_id"]), text, markup=kb_create(user_lang))
     except Exception as e:
         logger.warning("Cannot notify user: %s", e)
 
@@ -2907,38 +3184,603 @@ async def reject_draft(callback: CallbackQuery, bot: Bot) -> None:
 
 @router.callback_query(F.data.startswith("publish:"))
 async def publish_draft(callback: CallbackQuery, bot: Bot) -> None:
+    """Ручная публикация одного объявления. Все проверки — внутри
+    billing.claim_publication в момент нажатия; повторное/параллельное нажатие
+    получит 'in_progress'/'already_published' и ничего не продублирует и не спишет."""
     if callback.from_user.id not in ADMIN_IDS:
         await callback.answer("Нет доступа", show_alert=True)
         return
 
     draft_id = int(callback.data.split(":")[1])
-    draft    = await get_draft(draft_id)
-    if not draft:
-        await callback.answer("Заявка не найдена", show_alert=True)
-        return
-    if draft["published"]:
-        await callback.answer("Уже опубликовано", show_alert=True)
+    res = await _execute_publication(bot, draft_id)
+
+    if res["status"] == "claim_failed":
+        claim = res["claim"]
+        if claim.code == "cooldown":
+            await callback.answer()
+            await callback.message.reply(_cooldown_text(claim))
+        elif claim.code == "trip_passed":
+            await callback.answer("Дата поездки прошла", show_alert=True)
+            await _cancel_trip_passed(bot, claim.draft)
+            try:
+                await callback.message.edit_reply_markup(reply_markup=None)
+            except Exception:
+                pass
+        else:
+            await callback.answer(_claim_fail_text(claim)[:190], show_alert=True)
+            if claim.code in ("already_published", "rejected", "cancelled"):
+                try:
+                    await callback.message.edit_reply_markup(reply_markup=None)
+                except Exception:
+                    pass
         return
 
-    channel_msg_id = await _do_publish(bot, draft)
-    if not channel_msg_id:
-        await callback.answer("Ошибка публикации", show_alert=True)
+    if res["status"] != "published":
+        await callback.answer("Ошибка публикации — баланс не списан", show_alert=True)
         return
-
-    await mark_published(draft_id, channel_msg_id)
-    await _publish_to_groups(bot, draft, channel_msg_id)
 
     try:
         await callback.message.edit_reply_markup(reply_markup=None)
     except Exception:
         pass
     await callback.answer(f"{raw('check')} Опубликовано!")
-    await callback.message.reply(f"{raw('check')} Объявление опубликовано.")
+    fin = res["fin"]
+    extra = ""
+    if fin.get("funding") == "paid" and fin.get("balance") is not None:
+        extra = f" Списана 1 платная публикация, остаток: {fin['balance']}."
+    elif fin.get("funding") == "free":
+        extra = " Бесплатная публикация (платный баланс не тронут)."
+    await callback.message.reply(f"{raw('check')} Объявление #{draft_id} опубликовано.{extra}")
 
-    if draft["pending_chat_id"] and draft["pending_msg_id"]:
-        await _delete(bot, draft["pending_chat_id"], draft["pending_msg_id"])
 
-    await _notify_user_published(bot, int(draft["user_id"]))
+# ════════════════════════════════════════════════════════════════════════════
+# ПУБЛИКАЦИИ, ОПЛАТА ПЕРЕВОДОМ, СТАТУС (пользователь)
+# ════════════════════════════════════════════════════════════════════════════
+
+PAYMENT_STATUS_RU = {
+    "awaiting_receipt": "ожидает чек",
+    "receipt_received": "ожидает проверки оплаты",
+    "confirmed":        "оплата подтверждена",
+    "rejected":         "чек отклонён",
+}
+DRAFT_STATUS_RU = {
+    "pending": "на модерации", "approved": "одобрено (в очереди)", "publishing": "публикуется",
+    "publish_error": "ошибка публикации", "published": "опубликовано",
+    "rejected": "отклонено", "cancelled": "отменено",
+}
+
+
+def _plural_key(n: int) -> str:
+    n10, n100 = n % 10, n % 100
+    if n10 == 1 and n100 != 11:
+        return "1"
+    if 2 <= n10 <= 4 and not 12 <= n100 <= 14:
+        return "2"
+    return "5"
+
+
+def _pub_word(lang: str, n: int) -> str:
+    return t(lang, f"unit_pub_{_plural_key(n)}")
+
+
+def _days_text(lang: str, n: int) -> str:
+    return t(lang, "today_word") if n <= 0 else f"{n} {t(lang, 'unit_day_' + _plural_key(n))}"
+
+
+def kb_pay_admin(payment_id: int) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="✅ Подтвердить оплату", callback_data=f"padm:ok:{payment_id}")],
+        [InlineKeyboardButton(text="❌ Отклонить чек",      callback_data=f"padm:no:{payment_id}")],
+    ])
+
+
+def kb_buy_menu(lang: str) -> InlineKeyboardMarkup:
+    rows = [[InlineKeyboardButton(
+        text=t(lang, "btn_pkg", qty=q, word=_pub_word(lang, q), price=pr), callback_data=f"buy:pkg:{q}")]
+        for q, pr in billing.PACKAGES.items()]
+    return kb_with_back_close(lang, rows)
+
+
+def kb_with_back_close(lang: str, rows: list) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(inline_keyboard=rows + [[
+        InlineKeyboardButton(text=t(lang, "btn_back"), callback_data="buy:close")]])
+
+
+def _admin_user_line(user_id: int, full_name: Optional[str], tg_username: Optional[str]) -> str:
+    uname = f"@{esc(tg_username)}" if tg_username else "—"
+    return f"{e('person')} {esc(full_name or 'Пользователь')} ({uname})\n{e('id_card')} ID: <code>{user_id}</code>"
+
+
+async def _user_row(user_id: int) -> Optional[asyncpg.Record]:
+    async with pool().acquire() as conn:
+        return await conn.fetchrow("SELECT * FROM users WHERE user_id=$1", user_id)
+
+
+async def _readiness_line(row: asyncpg.Record) -> str:
+    """Короткий вывод для админа: можно ли публиковать объявление прямо сейчас."""
+    uid = int(row["user_id"])
+    ov = await billing.get_overview(pool(), uid)
+    if billing.trip_passed(row):
+        return "⚠️ Дата поездки прошла — публикация невозможна."
+    if row["funding"] == "paid" and ov["available"] < 1:
+        return "💳 Ожидает оплаты: платных публикаций на балансе нет."
+    if row["funding"] == "free" and not ov["free_available"]:
+        return f"⚠️ Бесплатное место занято до {billing.fmt_local(ov['free_until'])}."
+    if ov["next_at"]:
+        return f"⏳ Готово, но 24-часовое ограничение до {billing.fmt_local(ov['next_at'])}."
+    return "✅ Готово к публикации."
+
+
+async def _cancel_trip_passed(bot: Bot, draft: asyncpg.Record) -> None:
+    """Дата поездки прошла: заявка не может быть опубликована → отменяем (баланс не
+    затрагивается) и предлагаем пользователю создать объявление с актуальной датой."""
+    row = await billing._transition(pool(), int(draft["id"]), "cancelled", billing.EDITABLE_STATUSES)
+    if row is None:
+        return
+    uid = int(draft["user_id"])
+    lang = await get_user_lang(uid)
+    try:
+        await _send(bot, uid, t(lang, "trip_passed_no_pay"), markup=kb_create(lang))
+    except Exception as ex:
+        logger.warning("trip-passed notify failed %s: %s", uid, ex)
+    await _notify_admins(bot, f"⚠️ Объявление #{draft['id']} отменено: дата поездки прошла.")
+
+
+async def _open_draft_or_stale(bot: Bot, user_id: int) -> tuple[Optional[asyncpg.Record], bool]:
+    """(открытая заявка | None, было_ли_только_что_отменено_из-за_прошедшей_даты)."""
+    row = await billing.get_open_draft(pool(), user_id)
+    if row is not None and row["status"] != "publishing" and billing.trip_passed(row):
+        await _cancel_trip_passed(bot, row)
+        return None, True
+    return row, False
+
+
+def kb_block(lang: str) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text=t(lang, "btn_status"),       callback_data="mystatus")],
+        [InlineKeyboardButton(text=t(lang, "btn_cancel_short"), callback_data="dismiss")],
+    ])
+
+
+async def _show_open_draft_block(bot: Bot, chat_id: int, lang: str, old_id: Optional[int]) -> None:
+    await replace_bot_msg(bot, chat_id, old_id, t(lang, "open_draft_block"), markup=kb_block(lang))
+
+
+async def _block_if_open_draft(bot: Bot, chat_id: int, user_id: int, lang: str,
+                               old_id: Optional[int]) -> bool:
+    row, _ = await _open_draft_or_stale(bot, user_id)
+    if row is None:
+        return False
+    await _show_open_draft_block(bot, chat_id, lang, old_id)
+    return True
+
+
+@router.callback_query(F.data == "dismiss")
+async def dismiss_cb(callback: CallbackQuery, state: FSMContext, bot: Bot) -> None:
+    await callback.answer()
+    lang = await get_user_lang(callback.from_user.id)
+    await state.clear()
+    await _show_welcome(bot, callback.message.chat.id, state, lang, old_id=callback.message.message_id)
+
+
+# ── Статус заявки пользователя ────────────────────────────────────────────────
+
+async def _status_screen(bot: Bot, user_id: int, lang: str) -> tuple[str, InlineKeyboardMarkup]:
+    row, stale = await _open_draft_or_stale(bot, user_id)
+    ov = await billing.get_overview(pool(), user_id)
+    if row is None:
+        text = t(lang, "trip_passed_no_pay") if stale else t(lang, "status_no_open")
+        text += "\n\n" + t(lang, "status_balance", n=ov["available"])
+        return text, kb_create(lang)
+
+    lines = [t(lang, "status_head", id=row["id"]), t(lang, f"status_{row['status']}")]
+    lines.append(t(lang, "status_funding_paid" if row["funding"] == "paid" else "status_funding_free"))
+    lines.append(t(lang, "status_balance", n=ov["available"]))
+    waiting = row["funding"] == "paid" and ov["available"] < 1
+    if waiting:
+        lines.append("\n" + t(lang, "status_waiting_payment"))
+    if ov["next_at"]:
+        lines.append(t(lang, "status_next_at", dt=billing.fmt_local(ov["next_at"])))
+
+    rows: list[list[InlineKeyboardButton]] = []
+    editable = row["status"] in billing.EDITABLE_STATUSES
+    if waiting:
+        rows.append([InlineKeyboardButton(text=t(lang, "btn_buy"), callback_data="buy:menu")])
+    if editable and row["funding"] == "paid" and ov["free_available"]:
+        rows.append([InlineKeyboardButton(text=t(lang, "btn_use_free"), callback_data=f"myfund:{row['id']}:free")])
+    if editable and row["funding"] == "free" and ov["available"] >= 1:
+        rows.append([InlineKeyboardButton(text=t(lang, "btn_use_paid"), callback_data=f"myfund:{row['id']}:paid")])
+    if editable:
+        rows.append([InlineKeyboardButton(text=t(lang, "btn_cancel_ad"), callback_data=f"mycancel:{row['id']}")])
+    rows.append([InlineKeyboardButton(text=t(lang, "btn_close"), callback_data="dismiss")])
+    return "\n".join(lines), InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+@router.callback_query(F.data == "mystatus")
+async def my_status_cb(callback: CallbackQuery, bot: Bot) -> None:
+    await callback.answer()
+    lang = await get_user_lang(callback.from_user.id)
+    text, kb = await _status_screen(bot, callback.from_user.id, lang)
+    await replace_bot_msg(bot, callback.message.chat.id, callback.message.message_id, text, kb)
+
+
+@router.message(Command("status"))
+async def cmd_status(message: Message, bot: Bot) -> None:
+    lang = await get_user_lang(message.from_user.id)
+    text, kb = await _status_screen(bot, message.from_user.id, lang)
+    await _send(bot, message.chat.id, text, kb)
+
+
+@router.callback_query(F.data.startswith("mycancel:"))
+async def my_cancel_cb(callback: CallbackQuery, bot: Bot) -> None:
+    lang = await get_user_lang(callback.from_user.id)
+    draft_id = int(callback.data.split(":")[1])
+    row = await billing.cancel_draft(pool(), draft_id, callback.from_user.id)
+    if row is None:
+        await callback.answer(t(lang, "cancel_failed"), show_alert=True)
+        return
+    await callback.answer()
+    await replace_bot_msg(bot, callback.message.chat.id, callback.message.message_id,
+                          t(lang, "cancel_done"), kb_create(lang))
+    await _notify_admins(bot, f"🗑 Пользователь {row['user_id']} отменил объявление #{draft_id}.")
+
+
+@router.callback_query(F.data.startswith("myfund:"))
+async def my_funding_cb(callback: CallbackQuery, bot: Bot) -> None:
+    """Явный выбор: бесплатная или платная публикация. Ничего не списывается."""
+    lang = await get_user_lang(callback.from_user.id)
+    _, draft_id_s, funding = callback.data.split(":")
+    if funding == "paid":
+        bal, reserved = await billing.get_balance(pool(), callback.from_user.id)
+        if bal - reserved < 1:
+            await callback.answer(t(lang, "funding_no_balance"), show_alert=True)
+            return
+    ok, code = await billing.set_funding(pool(), int(draft_id_s), callback.from_user.id, funding)
+    if not ok:
+        await callback.answer(t(lang, "funding_free_taken" if code == "free_taken" else "cancel_failed"),
+                              show_alert=True)
+        return
+    await callback.answer(t(lang, "funding_changed"))
+    text, kb = await _status_screen(bot, callback.from_user.id, lang)
+    await replace_bot_msg(bot, callback.message.chat.id, callback.message.message_id, text, kb)
+
+
+# ── Баланс ────────────────────────────────────────────────────────────────────
+
+async def _own_balance_text(user_id: int, lang: str) -> str:
+    ov = await billing.get_overview(pool(), user_id)
+    free = (t(lang, "balance_free_yes") if ov["free_available"]
+            else t(lang, "balance_free_no", dt=billing.fmt_local(billing.local_to_utc(ov["free_until"]))))
+    return t(lang, "balance_text", balance=ov["available"], free=free)
+
+
+# ── Покупка пакета ────────────────────────────────────────────────────────────
+
+@router.message(Command("buy"))
+async def cmd_buy(message: Message, bot: Bot) -> None:
+    lang = await get_user_lang(message.from_user.id)
+    await _send(bot, message.chat.id, t(lang, "buy_menu"), kb_buy_menu(lang))
+
+
+@router.callback_query(F.data == "buy:menu")
+async def buy_menu_cb(callback: CallbackQuery, bot: Bot) -> None:
+    await callback.answer()
+    lang = await get_user_lang(callback.from_user.id)
+    text = await _own_balance_text(callback.from_user.id, lang) + "\n\n" + t(lang, "buy_menu")
+    await replace_bot_msg(bot, callback.message.chat.id, callback.message.message_id, text, kb_buy_menu(lang))
+
+
+@router.callback_query(F.data == "buy:close")
+async def buy_close_cb(callback: CallbackQuery, state: FSMContext, bot: Bot) -> None:
+    await callback.answer()
+    lang = await get_user_lang(callback.from_user.id)
+    await state.clear()
+    await _show_welcome(bot, callback.message.chat.id, state, lang, old_id=callback.message.message_id)
+
+
+async def _package_warning(bot: Bot, user_id: int, lang: str, qty: int) -> tuple[Optional[str], bool]:
+    """
+    Предупреждение ДО оплаты (единый расчёт billing.calc_usable_publications).
+    Возвращает (текст_предупреждения | None, дата_поездки_прошла).
+    Покупку это никогда не блокирует — купленные публикации бессрочные.
+    """
+    row, stale = await _open_draft_or_stale(bot, user_id)
+    if stale:
+        return None, True
+    if row is None:
+        return None, False
+    ov = await billing.get_overview(pool(), user_id)
+    deadline = billing.draft_deadline(row)
+    calc = billing.calc_usable_publications(
+        now=None, last_pub_at=ov["last_pub_at"], deadline_local=deadline,
+        free_available=ov["free_available"], balance_available=ov["available"], package_qty=qty,
+    )
+    if calc.fits:
+        return None, False
+    if (row["ad_type"] or "carrier") == "seeker":
+        days_left = max(0, (deadline - billing.to_local(billing.utcnow())).days)
+    else:
+        days_left = (billing.parse_trip_date(row["travel_date"]) - billing.to_local(billing.utcnow()).date()).days
+    return t(lang, "buy_warning", days_text=_days_text(lang, days_left), qty=qty,
+             word=_pub_word(lang, qty)), False
+
+
+@router.callback_query(F.data.startswith("buy:pkg:"))
+async def buy_pkg_cb(callback: CallbackQuery, bot: Bot) -> None:
+    qty = int(callback.data.split(":")[2])
+    lang = await get_user_lang(callback.from_user.id)
+    if qty not in billing.PACKAGES:
+        await callback.answer()
+        return
+    await callback.answer()
+    warning, passed = await _package_warning(bot, callback.from_user.id, lang, qty)
+    chat_id, mid = callback.message.chat.id, callback.message.message_id
+    if passed:
+        await replace_bot_msg(bot, chat_id, mid, t(lang, "trip_passed_no_pay"), kb_create(lang))
+        return
+    if warning is None:
+        await _start_payment(bot, callback.from_user, lang, qty, chat_id, mid)
+        return
+    price = billing.PACKAGES[qty]
+    await replace_bot_msg(bot, chat_id, mid, warning, InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text=t(lang, "btn_buy_pkg", qty=qty, word=_pub_word(lang, qty), price=price),
+                              callback_data=f"buy:go:{qty}")],
+        [InlineKeyboardButton(text=t(lang, "btn_other_pkg"),    callback_data="buy:menu")],
+        [InlineKeyboardButton(text=t(lang, "btn_cancel_short"), callback_data="buy:close")],
+    ]))
+
+
+@router.callback_query(F.data.startswith("buy:go:"))
+async def buy_go_cb(callback: CallbackQuery, bot: Bot) -> None:
+    await callback.answer()
+    qty = int(callback.data.split(":")[2])
+    lang = await get_user_lang(callback.from_user.id)
+    if qty not in billing.PACKAGES:
+        return
+    _, passed = await _package_warning(bot, callback.from_user.id, lang, qty)
+    if passed:
+        await replace_bot_msg(bot, callback.message.chat.id, callback.message.message_id,
+                              t(lang, "trip_passed_no_pay"), kb_create(lang))
+        return
+    await _start_payment(bot, callback.from_user, lang, qty, callback.message.chat.id,
+                         callback.message.message_id)
+
+
+def _pay_screen_text(lang: str, p: asyncpg.Record) -> str:
+    holder = f"\n{esc(CARD_HOLDER)}" if CARD_HOLDER else ""
+    return t(lang, "pay_screen", id=p["id"], qty=p["qty"], word=_pub_word(lang, int(p["qty"])),
+             price=p["amount"], card=esc(CARD_NUMBER), holder=holder)
+
+
+async def _start_payment(bot: Bot, user, lang: str, qty: int, chat_id: int, msg_id: int) -> None:
+    if not CARD_NUMBER:
+        await replace_bot_msg(bot, chat_id, msg_id, t(lang, "pay_no_card"), kb_create(lang))
+        return
+    open_row = await billing.get_open_draft(pool(), user.id)
+    p, created = await billing.create_payment(pool(), user.id, qty, int(open_row["id"]) if open_row else None)
+    await replace_bot_msg(bot, chat_id, msg_id, _pay_screen_text(lang, p), kb_with_back_close(lang, []))
+    if created:
+        await _notify_admins(
+            bot,
+            f"💳 <b>Новая заявка на оплату #{p['id']}</b>\n\n"
+            f"{_admin_user_line(user.id, user.full_name, user.username)}\n"
+            f"Пакет: {p['qty']} публикаций\nСумма: {p['amount']} ₽\n"
+            f"Статус: {PAYMENT_STATUS_RU[p['status']]}",
+        )
+
+
+@router.callback_query(F.data.startswith("payretry:"))
+async def pay_retry_cb(callback: CallbackQuery, bot: Bot) -> None:
+    """После отклонения чека — снова принимать чек по той же заявке."""
+    await callback.answer()
+    lang = await get_user_lang(callback.from_user.id)
+    p = await billing.reopen_payment(pool(), int(callback.data.split(":")[1]), callback.from_user.id)
+    if p is None:
+        return
+    await replace_bot_msg(bot, callback.message.chat.id, callback.message.message_id,
+                          _pay_screen_text(lang, p) + "\n\n" + t(lang, "pay_resend_prompt", id=p["id"]),
+                          kb_with_back_close(lang, []))
+
+
+# ── Админ: проверка оплаты ────────────────────────────────────────────────────
+
+@router.callback_query(F.data.startswith("padm:"))
+async def payment_admin_cb(callback: CallbackQuery, bot: Bot) -> None:
+    if callback.from_user.id not in ADMIN_IDS:
+        await callback.answer("Нет доступа", show_alert=True)
+        return
+    _, action, pid_s = callback.data.split(":")
+    pid = int(pid_s)
+    admin_id = callback.from_user.id
+
+    async def _strip() -> None:
+        try:
+            await callback.message.edit_reply_markup(reply_markup=None)
+        except Exception:
+            pass
+
+    if action == "ok":
+        res = await billing.confirm_payment(pool(), pid, admin_id)
+        p = res["payment"]
+        if res["result"] == "already":
+            await callback.answer("Уже подтверждено — повторного начисления нет", show_alert=True)
+            await _strip()
+            return
+        if res["result"] != "credited":
+            await callback.answer(f"Нельзя подтвердить (статус: {PAYMENT_STATUS_RU.get(p['status'], '?') if p else 'нет заявки'})",
+                                  show_alert=True)
+            return
+        await callback.answer("Оплата подтверждена")
+        await _strip()
+        await callback.message.reply(
+            f"✅ Оплата #{pid} подтверждена: пользователю {p['user_id']} начислено {p['qty']} публ. "
+            f"Баланс: {res['balance']}.\nОбъявления автоматически НЕ публикуются.")
+        uid = int(p["user_id"])
+        lang = await get_user_lang(uid)
+        try:
+            await _send(bot, uid, t(lang, "pay_confirmed_user", id=pid, qty=p["qty"],
+                                    word=_pub_word(lang, int(p["qty"])), balance=res["balance"]),
+                        markup=kb_create(lang))
+        except Exception as ex:
+            logger.warning("Cannot notify user %s about payment: %s", uid, ex)
+        # объявление продолжает жить в своём процессе; если оно уже одобрено — сообщаем админам
+        row = await billing.get_open_draft(pool(), uid)
+        if row is not None and row["status"] in billing.RETRIABLE_STATUSES:
+            try:
+                await _send(bot, uid, t(lang, "ad_approved_user"))
+            except Exception:
+                pass
+            await _notify_admins(
+                bot, f"📢 Объявление #{row['id']} готово к ручной публикации.\n{await _readiness_line(row)}",
+                markup=kb_admin(int(row["id"]), approved=True))
+    else:
+        status, p = await billing.reject_payment(pool(), pid, admin_id)
+        if status != "rejected":
+            await callback.answer(f"Нельзя отклонить (статус: {PAYMENT_STATUS_RU.get(p['status'], '?') if p else 'нет заявки'})",
+                                  show_alert=True)
+            return
+        await callback.answer("Чек отклонён")
+        await _strip()
+        await callback.message.reply(f"❌ Чек по заявке #{pid} отклонён. Публикации не начислены.")
+        uid = int(p["user_id"])
+        lang = await get_user_lang(uid)
+        try:
+            await _send(bot, uid, t(lang, "pay_rejected_user", id=pid), markup=InlineKeyboardMarkup(inline_keyboard=[
+                [InlineKeyboardButton(text=t(lang, "btn_resend_receipt"), callback_data=f"payretry:{pid}")],
+                [InlineKeyboardButton(text=t(lang, "btn_new_payment"),   callback_data="buy:menu")],
+            ]))
+        except Exception as ex:
+            logger.warning("Cannot notify user %s about rejection: %s", uid, ex)
+
+
+# ════════════════════════════════════════════════════════════════════════════
+# АДМИН: баланс, история, ручные операции, очередь
+# ════════════════════════════════════════════════════════════════════════════
+
+def _is_admin(message: Message) -> bool:
+    return message.from_user is not None and message.from_user.id in ADMIN_IDS
+
+
+def _fmt_ledger(rows: list) -> str:
+    if not rows:
+        return "  —"
+    out = []
+    for r in rows:
+        who = f", админ {r['admin_id']}" if r["admin_id"] else ""
+        ref = f", заявка #{r['payment_id']}" if r["payment_id"] else (f", объявление #{r['draft_id']}" if r["draft_id"] else "")
+        out.append(f"  {billing.fmt_local(r['created_at'])} · {r['delta']:+d} · {r['kind']}{ref}{who}"
+                   f"{' · ' + esc(r['reason']) if r['reason'] else ''} → {r['balance_after']}")
+    return "\n".join(out)
+
+
+@router.message(Command("balance"))
+async def cmd_balance(message: Message, bot: Bot) -> None:
+    parts = (message.text or "").split()
+    if _is_admin(message) and len(parts) > 1:
+        try:
+            uid = int(parts[1])
+        except ValueError:
+            await message.answer("Использование: /balance <user_id>")
+            return
+        ov = await billing.get_overview(pool(), uid)
+        u = await _user_row(uid)
+        pays = await billing.user_payments(pool(), uid, 5)
+        open_row = await billing.get_open_draft(pool(), uid)
+        lines = [
+            f"💼 <b>Баланс пользователя</b>\n{_admin_user_line(uid, u['full_name'] if u else None, u['tg_username'] if u else None)}",
+            f"\nПлатных на балансе: <b>{ov['balance']}</b> (зарезервировано: {ov['reserved']}, доступно: {ov['available']})",
+            "Бесплатная публикация: " + ("доступна" if ov["free_available"]
+                                         else f"занята до {billing.fmt_local(billing.local_to_utc(ov['free_until']))}"),
+            f"Последняя публикация: {billing.fmt_local(ov['last_pub_at'])}",
+            "Следующая доступна: " + (billing.fmt_local(ov["next_at"]) if ov["next_at"] else "сейчас"),
+            "Объявление в процессе: " + (f"#{open_row['id']} · {DRAFT_STATUS_RU[open_row['status']]}" if open_row else "нет"),
+            "\nПоследние заявки на оплату:",
+            "\n".join(f"  #{p['id']} · {p['qty']} шт · {p['amount']} ₽ · {PAYMENT_STATUS_RU[p['status']]}" for p in pays) or "  —",
+            f"\n/history {uid} · /credit {uid} N причина · /adjust {uid} ±N причина",
+        ]
+        await message.answer("\n".join(lines), parse_mode="HTML")
+        return
+    lang = await get_user_lang(message.from_user.id)
+    await _send(bot, message.chat.id, await _own_balance_text(message.from_user.id, lang),
+                kb_create(lang))
+
+
+@router.message(Command("history"))
+async def cmd_history(message: Message) -> None:
+    if not _is_admin(message):
+        return
+    parts = (message.text or "").split()
+    if len(parts) < 2 or not parts[1].lstrip("-").isdigit():
+        await message.answer("Использование: /history <user_id>")
+        return
+    uid = int(parts[1])
+    cr = await billing.ledger_history(pool(), uid, credits=True, limit=15)
+    db = await billing.ledger_history(pool(), uid, credits=False, limit=15)
+    await message.answer(f"📥 <b>Начисления</b> (пользователь {uid}):\n{_fmt_ledger(cr)}\n\n"
+                         f"📤 <b>Списания</b>:\n{_fmt_ledger(db)}", parse_mode="HTML")
+
+
+async def _manual_op(message: Message, bot: Bot, kind: str, sign_required: bool) -> None:
+    if not _is_admin(message):
+        return
+    parts = (message.text or "").split(maxsplit=3)
+    cmd = parts[0]
+    if len(parts) < 4:
+        await message.answer(f"Использование: {cmd} <user_id> <±количество> <причина>\nПричина обязательна.")
+        return
+    try:
+        uid, delta = int(parts[1]), int(parts[2])
+    except ValueError:
+        await message.answer("user_id и количество должны быть целыми числами.")
+        return
+    if sign_required and delta <= 0:
+        await message.answer("Для /credit количество должно быть > 0. Для уменьшения используйте /adjust.")
+        return
+    try:
+        new_bal = await billing.manual_adjust(pool(), message.from_user.id, uid, delta, parts[3], kind)
+    except ValueError as ex:
+        await message.answer(f"❌ Не выполнено: {esc(str(ex))} (нельзя уйти ниже зарезервированного/нуля).")
+        return
+    logger.info("MANUAL %s admin=%s user=%s delta=%s reason=%r", kind, message.from_user.id, uid, delta, parts[3])
+    await message.answer(f"✅ {kind}: пользователь {uid}, {delta:+d}. Баланс: {new_bal}. Записано в историю.")
+    lang = await get_user_lang(uid)
+    try:
+        await _send(bot, uid, t(lang, "manual_credit_user", delta=delta, balance=new_bal))
+    except Exception:
+        pass
+
+
+@router.message(Command("credit"))
+async def cmd_credit(message: Message, bot: Bot) -> None:
+    await _manual_op(message, bot, "manual_credit", True)
+
+
+@router.message(Command("adjust"))
+async def cmd_adjust(message: Message, bot: Bot) -> None:
+    await _manual_op(message, bot, "manual_adjust", False)
+
+
+@router.message(Command("queue"))
+async def cmd_queue(message: Message, bot: Bot) -> None:
+    """Админская очередь: одобренные объявления с кнопкой «📢 Опубликовать» у каждого."""
+    if not _is_admin(message):
+        return
+    rows = await billing.queue_ready(pool(), 15)
+    if not rows:
+        await message.answer("Очередь публикации пуста.")
+        return
+    for r in rows:
+        head = build_admin_notification(
+            draft_id=int(r["id"]), full_name=r["full_name"] or "Пользователь", user_id=int(r["user_id"]),
+            tg_username=r["tg_username"], cities=parse_route(r), travel_date=str(r["travel_date"]),
+            cargo=str(r["cargo"]), phone=str(r["phone"] or ""), custom_username=r["custom_username"],
+            ad_type=r["ad_type"] or "carrier", funding=r["funding"],
+        )
+        try:
+            await _send(bot, message.chat.id, head + "\n" + await _readiness_line(r),
+                        markup=kb_admin(int(r["id"]), approved=True))
+        except Exception as ex:
+            logger.warning("queue item %s failed: %s", r["id"], ex)
 
 
 # ════════════════════════════════════════════════════════════════════════════
@@ -2974,8 +3816,8 @@ async def receive_feedback(message: Message, state: FSMContext, bot: Bot) -> Non
                 f"{e('id_card')} <code>{user.id}</code>\n\n"
                 f"{esc(text)}",
             )
-        except Exception as e:
-            logger.exception("Feedback to admin %s failed: %s", admin_id, e)
+        except Exception as ex:
+            logger.exception("Feedback to admin %s failed: %s", admin_id, ex)
 
     lang = await get_user_lang(message.from_user.id)
     data = await state.get_data()
@@ -3188,6 +4030,15 @@ async def main() -> None:
     me           = await bot.get_me()
     BOT_USERNAME = me.username
     logger.info("Bot started as @%s", BOT_USERNAME)
+
+    # Перезапуск во время публикации: 'publishing' → 'publish_error', резерв снят, списания нет.
+    stuck = await billing.recover_stuck_publications(pool())
+    if stuck:
+        logger.warning("Recovered stuck publications: %s", stuck)
+        await _notify_admins(
+            bot, "⚠️ После перезапуска бота публикации " + ", ".join(f"#{i}" for i in stuck) +
+                 " были прерваны. Проверьте канал вручную (пост мог успеть уйти) и только затем "
+                 "повторите публикацию. Баланс не списан.")
 
     asyncio.create_task(scheduler_loop(bot))
 
