@@ -843,3 +843,9 @@ async def queue_ready(pool: asyncpg.Pool, limit: int = 20) -> list[asyncpg.Recor
             "SELECT * FROM drafts WHERE status = ANY($2::text[]) ORDER BY id LIMIT $1",
             limit, list(RETRIABLE_STATUSES),
         )
+
+
+async def queue_pending(pool: asyncpg.Pool, limit: int = 20) -> list[asyncpg.Record]:
+    """Объявления на модерации (ещё не одобрены) — для /queue после обновления/потери сообщений."""
+    async with pool.acquire() as conn:
+        return await conn.fetch("SELECT * FROM drafts WHERE status='pending' ORDER BY id LIMIT $1", limit)

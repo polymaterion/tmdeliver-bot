@@ -542,3 +542,11 @@ async def test_admin_queue_lists_only_ready():
     assert d1 in ids
     await billing.reject_draft(main.pool(), d1)
     assert d1 not in [int(r["id"]) for r in await billing.queue_ready(main.pool(), 500)]
+
+
+async def test_queue_pending_lists_unapproved():
+    uid = new_uid()
+    d = await mk(uid, approve=False)
+    assert d in [int(r["id"]) for r in await billing.queue_pending(main.pool(), 500)]
+    await billing.approve_draft(main.pool(), d)
+    assert d not in [int(r["id"]) for r in await billing.queue_pending(main.pool(), 500)]

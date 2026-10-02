@@ -14,6 +14,7 @@ from aiogram.filters import Command, CommandStart
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 from aiogram.types import (
+    BufferedInputFile,
     CallbackQuery,
     ChatMemberUpdated,
     InlineKeyboardButton,
@@ -1856,6 +1857,17 @@ async def receive_receipt(message: Message, bot: Bot) -> None:
 # ════════════════════════════════════════════════════════════════════════════
 # ГРУППОВЫЕ ЧАТЫ: авто-регистрация + /settopic + команды городов
 # ════════════════════════════════════════════════════════════════════════════
+
+@router.my_chat_member(F.chat.type == "private")
+async def on_private_block_changed(event: ChatMemberUpdated) -> None:
+    """Пользователь заблокировал / разблокировал бота — Telegram присылает это сразу,
+    так что users.is_blocked актуален без рассылки. (Должен стоять ДО групповых
+    my_chat_member-хендлеров, иначе их фильтр IS_NOT_MEMBER перехватит событие.)"""
+    blocked = event.new_chat_member.status in ("kicked", "left")
+    async with pool().acquire() as conn:
+        await conn.execute("UPDATE users SET is_blocked=$2 WHERE user_id=$1", event.chat.id, blocked)
+    logger.info("User %s %s the bot", event.chat.id, "blocked" if blocked else "unblocked")
+
 
 @router.my_chat_member(ChatMemberUpdatedFilter(member_status_changed=IS_MEMBER))
 async def on_bot_added_to_group(event: ChatMemberUpdated) -> None:
@@ -3762,25 +3774,29 @@ async def cmd_adjust(message: Message, bot: Bot) -> None:
 
 @router.message(Command("queue"))
 async def cmd_queue(message: Message, bot: Bot) -> None:
-    """Админская очередь: одобренные объявления с кнопкой «📢 Опубликовать» у каждого."""
+    """Админская очередь: одобренные (кнопка «📢 Опубликовать») и ожидающие модерации (кнопка «Одобрить»)."""
     if not _is_admin(message):
         return
-    rows = await billing.queue_ready(pool(), 15)
-    if not rows:
-        await message.answer("Очередь публикации пуста.")
+    approved = await billing.queue_ready(pool(), 15)
+    pending  = await billing.queue_pending(pool(), 15)
+    if not approved and not pending:
+        await message.answer("Очередь пуста.")
         return
-    for r in rows:
-        head = build_admin_notification(
-            draft_id=int(r["id"]), full_name=r["full_name"] or "Пользователь", user_id=int(r["user_id"]),
-            tg_username=r["tg_username"], cities=parse_route(r), travel_date=str(r["travel_date"]),
-            cargo=str(r["cargo"]), phone=str(r["phone"] or ""), custom_username=r["custom_username"],
-            ad_type=r["ad_type"] or "carrier", funding=r["funding"],
-        )
-        try:
-            await _send(bot, message.chat.id, head + "\n" + await _readiness_line(r),
-                        markup=kb_admin(int(r["id"]), approved=True))
-        except Exception as ex:
-            logger.warning("queue item %s failed: %s", r["id"], ex)
+    for title, rows, is_ok in (("📢 К публикации", approved, True), ("🕵️ На модерации", pending, False)):
+        if rows:
+            await message.answer(f"<b>{title}: {len(rows)}</b>", parse_mode="HTML")
+        for r in rows:
+            head = build_admin_notification(
+                draft_id=int(r["id"]), full_name=r["full_name"] or "Пользователь", user_id=int(r["user_id"]),
+                tg_username=r["tg_username"], cities=parse_route(r), travel_date=str(r["travel_date"]),
+                cargo=str(r["cargo"]), phone=str(r["phone"] or ""), custom_username=r["custom_username"],
+                ad_type=r["ad_type"] or "carrier", funding=r["funding"],
+            )
+            try:
+                tail = ("\n" + await _readiness_line(r)) if is_ok else ""
+                await _send(bot, message.chat.id, head + tail, markup=kb_admin(int(r["id"]), approved=is_ok))
+            except Exception as ex:
+                logger.warning("queue item %s failed: %s", r["id"], ex)
 
 
 # ════════════════════════════════════════════════════════════════════════════
@@ -4014,6 +4030,30 @@ async def cmd_stats(message: Message) -> None:
         f"{e('group')} <b>Групповые чаты</b>: {len(groups)}\n"
     )
     await message.answer(text, parse_mode="HTML")
+
+
+@router.message(Command("users"))
+async def cmd_users(message: Message, bot: Bot) -> None:
+    """Список пользователей, не заблокировавших бота (CSV-файлом) + сводка."""
+    if message.from_user.id not in ADMIN_IDS:
+        return
+    async with pool().acquire() as conn:
+        rows = await conn.fetch(
+            "SELECT user_id, tg_username, full_name, lang, first_seen, last_seen "
+            "FROM users WHERE is_blocked=FALSE ORDER BY first_seen")
+        blocked = await conn.fetchval("SELECT count(*) FROM users WHERE is_blocked=TRUE")
+    import csv, io
+    buf = io.StringIO()
+    w = csv.writer(buf)
+    w.writerow(["user_id", "username", "full_name", "lang", "first_seen", "last_seen"])
+    for r in rows:
+        w.writerow([r["user_id"], r["tg_username"] or "", r["full_name"] or "", r["lang"],
+                    billing.fmt_local(r["first_seen"]), billing.fmt_local(r["last_seen"])])
+    await bot.send_document(
+        message.chat.id,
+        BufferedInputFile(("\ufeff" + buf.getvalue()).encode("utf-8"), filename="active_users.csv"),
+        caption=f"👥 Не заблокировали бота: {len(rows)}\n🚫 Заблокировали: {blocked}",
+    )
 
 
 # ════════════════════════════════════════════════════════════════════════════
