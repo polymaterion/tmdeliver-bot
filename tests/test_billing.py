@@ -169,19 +169,29 @@ async def test_migration_legacy_published_occupies_free_slot():
 
 
 # ── S6–S8: очередь и защита от повторной отправки ────────────────────────────
-async def test_S6_S7_submit_charges_nothing_and_second_blocked():
+async def test_S6_S7_multi_drafts_and_only_pending_identical_blocked():
     uid = new_uid()
-    await credit(uid, 2)
-    d = await mk(uid, approve=False)
-    assert await billing.get_balance(main.pool(), uid) == (2, 0)
-    with pytest.raises(billing.OpenDraftExists) as ei:
+    d1 = await mk(uid, approve=False)
+    # Другое объявление того же пользователя не блокируется.
+    d2 = await billing.create_draft(main.pool(), dict(
+        user_id=uid, full_name="U", cities=["Москва", "Казань"], travel_date=future(10),
+        cargo="docs", phone="+79990000000", ad_type="carrier"))
+    assert d2 != d1
+    # Идентичное объявление блокируется только пока первое pending.
+    with pytest.raises(billing.PendingDuplicate) as ei:
         await mk(uid, approve=False)
-    assert ei.value.draft_id == d
-    # параллельные попытки — создаётся ровно одна заявка
+    assert ei.value.draft_id == d1
+    assert await billing.approve_draft(main.pool(), d1)
+    # После завершения модерации идентичная новая заявка разрешена.
+    d3 = await billing.create_draft(main.pool(), dict(
+        user_id=uid, full_name="U", cities=["Москва", "Ашхабад"], travel_date=future(10),
+        cargo="docs", phone="+79990000000", ad_type="carrier"))
+    assert d3 != d1
+    # Параллельные одинаковые pending-заявки: создаётся ровно одна.
     uid2 = new_uid()
     res = await asyncio.gather(*[mk(uid2, approve=False) for _ in range(8)], return_exceptions=True)
     assert sum(isinstance(x, int) for x in res) == 1
-    assert sum(isinstance(x, billing.OpenDraftExists) for x in res) == 7
+    assert sum(isinstance(x, billing.PendingDuplicate) for x in res) == 7
 
 
 async def test_rejected_and_cancelled_do_not_block():
@@ -281,7 +291,7 @@ async def test_S12_paid_publication_charges_exactly_one():
     assert len(spends) == 1 and spends[0]["delta"] == -1 and spends[0]["draft_id"] == d
 
 
-async def test_S14_S15_balance_5_cannot_publish_5_in_a_row_and_S16_after_24h():
+async def test_S14_S15_identical_cooldown_but_different_ads_are_immediate():
     uid, bot = new_uid(), FakeBot()
     await publish(bot, await mk(uid))
     await age_publications(uid)
@@ -289,20 +299,31 @@ async def test_S14_S15_balance_5_cannot_publish_5_in_a_row_and_S16_after_24h():
     d1 = await mk(uid)
     assert (await publish(bot, d1))["status"] == "published"
     posts = bot.channel_posts
+
+    # Идентичное объявление блокируется на 24 часа.
     d2 = await mk(uid)
     r = await publish(bot, d2)
-    assert r["status"] == "claim_failed" and r["claim"].code == "cooldown"                    # S14/S15
+    assert r["status"] == "claim_failed" and r["claim"].code == "cooldown"
     assert r["claim"].next_at - r["claim"].last_at == timedelta(hours=24)
     assert bot.channel_posts == posts and await billing.get_balance(main.pool(), uid) == (4, 0)
-    await age_publications(uid, hours=23)        # прошло 23 ч + 1 сек?  → всё ещё нельзя
-    await main.pool().execute("UPDATE drafts SET published_at=now()-interval '23 hours' WHERE user_id=$1 AND status='published' AND id=$2", uid, d1)
+
+    # Другое объявление того же пользователя не зависит от cooldown d1.
+    d3 = await billing.create_draft(main.pool(), dict(
+        user_id=uid, full_name="U", cities=["Москва", "Казань"], travel_date=future(10),
+        cargo="docs", phone="+79990000000", ad_type="carrier"))
+    await billing.approve_draft(main.pool(), d3)
+    assert (await publish(bot, d3))["status"] == "published"
+
+    await main.pool().execute(
+        "UPDATE drafts SET published_at=now()-interval '23 hours' WHERE id=$1", d1)
     assert (await publish(bot, d2))["claim"].code == "cooldown"
-    await main.pool().execute("UPDATE drafts SET published_at=now()-interval '24 hours 1 second' WHERE user_id=$1 AND status='published'", uid)
-    assert (await publish(bot, d2))["status"] == "published"                                  # S16
-    assert await billing.get_balance(main.pool(), uid) == (3, 0)
+    await main.pool().execute(
+        "UPDATE drafts SET published_at=now()-interval '24 hours 1 second' WHERE id=$1", d1)
+    assert (await publish(bot, d2))["status"] == "published"
+    assert await billing.get_balance(main.pool(), uid) == (2, 0)
 
 
-async def test_cooldown_applies_to_free_too_and_other_users_unaffected():
+async def test_cooldown_is_per_fingerprint_and_other_users_unaffected():
     a, b, bot = new_uid(), new_uid(), FakeBot()
     await publish(bot, await mk(a))
     assert (await publish(bot, await mk(b)))["status"] == "published"
@@ -310,6 +331,37 @@ async def test_cooldown_applies_to_free_too_and_other_users_unaffected():
     da = await mk(a)
     assert (await publish(bot, da))["claim"].code == "cooldown"
 
+
+
+
+async def test_auto_schedule_distributes_queue_and_respects_identical_24h():
+    uid = new_uid()
+    d1 = await mk(uid, date=future(10))
+    d2 = await mk(uid, date=future(10))
+    d3 = await mk(uid, date=future(10))
+    scheduled = await billing.set_publication_mode(main.pool(), uid, "auto")
+    assert set(scheduled) == {d1, d2, d3}
+    rows = await main.pool().fetch(
+        "SELECT id, fingerprint, scheduled_at FROM drafts WHERE id = ANY($1::int[]) ORDER BY id", scheduled)
+    assert all(r["scheduled_at"] for r in rows)
+    times = [billing.to_local(billing.utcnow())]  # just establish timezone context
+    parsed = [__import__("datetime").datetime.strptime(r["scheduled_at"], "%d.%m.%Y %H:%M") for r in rows]
+    assert parsed[0] < parsed[1] < parsed[2]
+    assert (parsed[1] - parsed[0]).total_seconds() >= 24 * 3600
+    assert (parsed[2] - parsed[1]).total_seconds() >= 24 * 3600
+
+
+async def test_different_fingerprints_can_publish_without_user_cooldown():
+    uid, bot = new_uid(), FakeBot()
+    await credit(uid, 2)
+    d1 = await mk(uid, funding="paid")
+    d2 = await billing.create_draft(main.pool(), dict(
+        user_id=uid, full_name="U", cities=["Москва", "Казань"], travel_date=future(10),
+        cargo="docs", phone="+79990000000", ad_type="carrier"))
+    await billing.approve_draft(main.pool(), d2)
+    await main.pool().execute("UPDATE drafts SET funding='paid' WHERE id=$1", d2)
+    assert (await publish(bot, d1))["status"] == "published"
+    assert (await publish(bot, d2))["status"] == "published"
 
 # ── S17–S19: ошибки Telegram и гонки ─────────────────────────────────────────
 async def test_S17_telegram_error_no_charge_and_retry():
