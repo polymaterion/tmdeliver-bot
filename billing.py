@@ -522,8 +522,14 @@ async def set_funding(pool: asyncpg.Pool, draft_id: int, user_id: int, funding: 
             d = await conn.fetchrow("SELECT * FROM drafts WHERE id=$1 AND user_id=$2 FOR UPDATE", draft_id, user_id)
             if d is None or d["status"] not in EDITABLE_STATUSES:
                 return False, "not_editable"
-            if funding == "free" and await _free_slot_until(conn, user_id, exclude_draft_id=draft_id) is not None:
-                return False, "free_taken"
+            if funding == "free":
+                free_open = await conn.fetchval(
+                    "SELECT 1 FROM drafts WHERE user_id=$1 AND id<>$2 AND funding='free' "
+                    "AND status IN ('pending','approved','publishing','publish_error') LIMIT 1",
+                    user_id, draft_id,
+                )
+                if free_open is not None or await _free_slot_until(conn, user_id, exclude_draft_id=draft_id) is not None:
+                    return False, "free_taken"
             await conn.execute("UPDATE drafts SET funding=$2 WHERE id=$1", draft_id, funding)
             return True, "ok"
 
@@ -837,7 +843,15 @@ async def set_publication_mode(pool: asyncpg.Pool, user_id: int, mode: str) -> l
             "INSERT INTO users (user_id, publication_mode) VALUES ($1,$2) "
             "ON CONFLICT (user_id) DO UPDATE SET publication_mode=EXCLUDED.publication_mode, last_seen=now()",
             user_id, mode)
-    return await auto_schedule_user(pool, user_id) if mode == "auto" else []
+    if mode == "auto":
+        return await auto_schedule_user(pool, user_id)
+    async with pool.acquire() as conn:
+        await conn.execute(
+            "UPDATE drafts SET scheduled_at=NULL "
+            "WHERE user_id=$1 AND status IN ('approved','publish_error')",
+            user_id,
+        )
+    return []
 
 
 async def auto_schedule_user(pool: asyncpg.Pool, user_id: int) -> list[int]:
