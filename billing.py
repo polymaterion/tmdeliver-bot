@@ -38,6 +38,8 @@ main.py лишь вызывает эти функции из хендлеров.
 """
 from __future__ import annotations
 
+import hashlib
+import json
 import logging
 import math
 import re
@@ -54,6 +56,16 @@ logger = logging.getLogger(__name__)
 PACKAGES: dict[int, int] = {2: 100, 5: 200}     # количество публикаций → цена, ₽
 COOLDOWN = timedelta(hours=24)
 
+def make_fingerprint(ad_type: str, cities: list[str], travel_date: str,
+                     phone: str, custom_username: Optional[str]) -> str:
+    """Канонический fingerprint объявления для duplicate/cooldown-проверок."""
+    route = json.dumps(cities, ensure_ascii=False)
+    norm_phone = re.sub(r"[\s\-()]", "", phone or "")
+    norm_username = (custom_username or "").casefold().strip().lstrip("@")
+    raw = "|".join((ad_type or "carrier", route, str(travel_date or ""), norm_phone, norm_username))
+    return hashlib.md5(raw.encode("utf-8")).hexdigest()
+
+
 OPEN_STATUSES = ("pending", "approved", "publishing", "publish_error")
 EDITABLE_STATUSES = ("pending", "approved", "publish_error")   # можно отклонить/отменить
 RETRIABLE_STATUSES = ("approved", "publish_error")             # можно публиковать
@@ -67,10 +79,16 @@ def configure(tz_offset: int) -> None:
 
 
 class OpenDraftExists(Exception):
-    """У пользователя уже есть объявление в активном процессе (ТЗ п.2)."""
-
+    """Совместимость со старым API; общий лимит больше не используется."""
     def __init__(self, draft_id: int):
         super().__init__(f"open draft exists: {draft_id}")
+        self.draft_id = draft_id
+
+
+class PendingDuplicate(Exception):
+    """Идентичное объявление уже находится на модерации."""
+    def __init__(self, draft_id: int):
+        super().__init__(f"pending duplicate exists: {draft_id}")
         self.draft_id = draft_id
 
 
@@ -105,6 +123,7 @@ async def init_schema(pool: asyncpg.Pool) -> None:
             for col, ddl in (
                 ("status", "TEXT"),
                 ("funding", "TEXT"),
+                ("fingerprint", "TEXT"),
                 ("published_at", "TIMESTAMPTZ"),
                 ("publishing_started_at", "TIMESTAMPTZ"),
                 ("status_changed_at", "TIMESTAMPTZ"),
@@ -138,23 +157,23 @@ async def init_schema(pool: asyncpg.Pool) -> None:
             await conn.execute("ALTER TABLE drafts ALTER COLUMN funding SET DEFAULT 'free'")
             await conn.execute("ALTER TABLE drafts ALTER COLUMN funding SET NOT NULL")
 
-            # Не более одного объявления пользователя в активном процессе —
-            # гарантия на уровне БД (ТЗ п.2: «не только интерфейса»).
-            idx_exists = await conn.fetchval(
-                "SELECT 1 FROM pg_indexes WHERE indexname='ux_drafts_one_open_per_user'"
+            # Разные объявления пользователя могут находиться в открытом процессе одновременно.
+            await conn.execute("DROP INDEX IF EXISTS ux_drafts_one_open_per_user")
+            await conn.execute("""
+                UPDATE drafts SET fingerprint = md5(
+                    concat_ws('|',
+                        COALESCE(ad_type, 'carrier'),
+                        COALESCE(route, '[]'),
+                        COALESCE(travel_date, ''),
+                        regexp_replace(COALESCE(phone, ''), '[\\s\\-()]', '', 'g'),
+                        lower(trim(COALESCE(custom_username, '')))
+                    )
+                ) WHERE fingerprint IS NULL
+            """)
+            await conn.execute(
+                "CREATE INDEX IF NOT EXISTS ix_drafts_user_fingerprint_status "
+                "ON drafts (user_id, fingerprint, status)"
             )
-            if not idx_exists:
-                await conn.execute("""
-                    UPDATE drafts d SET status='cancelled'
-                    WHERE d.status IN ('pending','approved','publishing','publish_error')
-                      AND EXISTS (SELECT 1 FROM drafts d2
-                                  WHERE d2.user_id=d.user_id AND d2.id>d.id
-                                    AND d2.status IN ('pending','approved','publishing','publish_error'))
-                """)
-                await conn.execute("""
-                    CREATE UNIQUE INDEX ux_drafts_one_open_per_user ON drafts (user_id)
-                    WHERE status IN ('pending','approved','publishing','publish_error')
-                """)
             await conn.execute(
                 "CREATE INDEX IF NOT EXISTS ix_drafts_user_published ON drafts (user_id, published_at) "
                 "WHERE status='published'"
@@ -355,10 +374,23 @@ async def _free_slot_until(conn: asyncpg.Connection, user_id: int,
     return until
 
 
-async def _last_publication(conn: asyncpg.Connection, user_id: int) -> Optional[datetime]:
+async def _last_publication(conn: asyncpg.Connection, user_id: int,
+                       fingerprint: Optional[str] = None) -> Optional[datetime]:
+    if fingerprint:
+        return await conn.fetchval(
+            "SELECT max(published_at) FROM drafts WHERE user_id=$1 AND fingerprint=$2 AND status='published'",
+            user_id, fingerprint)
     return await conn.fetchval(
-        "SELECT max(published_at) FROM drafts WHERE user_id=$1 AND status='published'", user_id
-    )
+        "SELECT max(published_at) FROM drafts WHERE user_id=$1 AND status='published'", user_id)
+
+
+async def last_publication_for_draft(pool: asyncpg.Pool, draft_id: int) -> Optional[datetime]:
+    async with pool.acquire() as conn:
+        return await conn.fetchval(
+            "SELECT max(published_at) FROM drafts d "
+            "WHERE d.user_id=(SELECT user_id FROM drafts WHERE id=$1) "
+            "AND d.fingerprint=(SELECT fingerprint FROM drafts WHERE id=$1) AND d.status='published'",
+            draft_id)
 
 
 async def _apply_ledger(conn: asyncpg.Connection, *, user_id: int, delta: int, kind: str,
@@ -399,57 +431,54 @@ async def _apply_ledger(conn: asyncpg.Connection, *, user_id: int, delta: int, k
 # ── Черновики: создание и статусы ────────────────────────────────────────────
 
 async def create_draft(pool: asyncpg.Pool, d: dict[str, Any]) -> int:
-    """
-    Создаёт объявление (status='pending'). Под мьютексом пользователя:
-      • проверяет, что нет другого объявления в активном процессе (иначе OpenDraftExists);
-      • определяет funding: 'free' если бесплатное место свободно, иначе 'paid'.
-    Вторая линия защиты — частичный UNIQUE-индекс (ловим UniqueViolation).
-    """
-    import json
-    cities = d["cities"]
-    uid = int(d["user_id"])
-    try:
-        async with pool.acquire() as conn:
-            async with conn.transaction():
-                await _lock_balance(conn, uid)
-                existing = await conn.fetchval(
-                    "SELECT id FROM drafts WHERE user_id=$1 AND status = ANY($2::text[]) LIMIT 1",
-                    uid, list(OPEN_STATUSES),
-                )
-                if existing is not None:
-                    raise OpenDraftExists(int(existing))
-                free_until = await _free_slot_until(conn, uid)
-                funding = "paid" if free_until is not None else "free"
-                row = await conn.fetchrow(
-                    """
-                    INSERT INTO drafts
-                        (user_id, tg_username, custom_username, full_name,
-                         origin, destination, route, travel_date, cargo, phone, ad_type,
-                         status, funding, status_changed_at)
-                    VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,'pending',$12,now())
-                    RETURNING id
-                    """,
-                    uid, d.get("tg_username"), d.get("custom_username"), d["full_name"],
-                    cities[0], cities[-1], json.dumps(cities, ensure_ascii=False),
-                    d["travel_date"], d["cargo"], d.get("phone", ""), d.get("ad_type", "carrier"),
-                    funding,
-                )
-                return int(row["id"])
-    except asyncpg.UniqueViolationError:
-        async with pool.acquire() as conn:
+    """Создаёт самостоятельное объявление; разные drafts друг друга не блокируют."""
+    cities = d["cities"]; uid = int(d["user_id"])
+    ad_type = d.get("ad_type", "carrier"); travel_date = d["travel_date"]
+    phone = d.get("phone", ""); custom_username = d.get("custom_username")
+    fingerprint = make_fingerprint(ad_type, cities, travel_date, phone, custom_username)
+    async with pool.acquire() as conn:
+        async with conn.transaction():
+            await _lock_balance(conn, uid)
             existing = await conn.fetchval(
-                "SELECT id FROM drafts WHERE user_id=$1 AND status = ANY($2::text[]) LIMIT 1",
-                uid, list(OPEN_STATUSES),
-            )
-        raise OpenDraftExists(int(existing or 0))
+                "SELECT id FROM drafts WHERE user_id=$1 AND fingerprint=$2 AND status='pending' LIMIT 1",
+                uid, fingerprint)
+            if existing is not None:
+                raise PendingDuplicate(int(existing))
+            free_open = await conn.fetchval(
+                "SELECT 1 FROM drafts WHERE user_id=$1 AND funding='free' "
+                "AND status IN ('pending','approved','publishing','publish_error') LIMIT 1", uid)
+            free_until = await _free_slot_until(conn, uid)
+            funding = "free" if free_open is None and free_until is None else "paid"
+            row = await conn.fetchrow(
+                """INSERT INTO drafts
+                   (user_id,tg_username,custom_username,full_name,origin,destination,route,
+                    travel_date,cargo,phone,ad_type,status,funding,fingerprint,status_changed_at)
+                   VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,'pending',$12,$13,now())
+                   RETURNING id""",
+                uid,d.get("tg_username"),custom_username,d["full_name"],cities[0],cities[-1],
+                json.dumps(cities,ensure_ascii=False),travel_date,d["cargo"],phone,ad_type,
+                funding,fingerprint)
+            return int(row["id"])
 
 
 async def get_open_draft(pool: asyncpg.Pool, user_id: int) -> Optional[asyncpg.Record]:
+    """Совместимость: последний открытый draft."""
     async with pool.acquire() as conn:
         return await conn.fetchrow(
             "SELECT * FROM drafts WHERE user_id=$1 AND status = ANY($2::text[]) ORDER BY id DESC LIMIT 1",
-            user_id, list(OPEN_STATUSES),
-        )
+            user_id, list(OPEN_STATUSES))
+
+
+async def get_open_drafts(pool: asyncpg.Pool, user_id: int, limit: int = 50) -> list[asyncpg.Record]:
+    async with pool.acquire() as conn:
+        return await conn.fetch(
+            "SELECT * FROM drafts WHERE user_id=$1 AND status = ANY($2::text[]) ORDER BY id DESC LIMIT $3",
+            user_id, list(OPEN_STATUSES), limit)
+
+
+async def get_user_drafts(pool: asyncpg.Pool, user_id: int, limit: int = 50) -> list[asyncpg.Record]:
+    async with pool.acquire() as conn:
+        return await conn.fetch("SELECT * FROM drafts WHERE user_id=$1 ORDER BY id DESC LIMIT $2", user_id, limit)
 
 
 async def _transition(pool: asyncpg.Pool, draft_id: int, new_status: str,
@@ -540,13 +569,6 @@ async def claim_publication(pool: asyncpg.Pool, draft_id: int,
                 return ClaimResult(False, "not_approved", d)
             if trip_passed(d, now):
                 return ClaimResult(False, "trip_passed", d)
-            other = await conn.fetchval(
-                "SELECT id FROM drafts WHERE user_id=$1 AND status='publishing' AND id<>$2 LIMIT 1",
-                uid, draft_id,
-            )
-            if other is not None:
-                return ClaimResult(False, "other_publishing", d)
-
             funding = d["funding"] or "free"
             if funding == "free":
                 if await _free_slot_until(conn, uid, exclude_draft_id=draft_id, now=now) is not None:
@@ -555,7 +577,7 @@ async def claim_publication(pool: asyncpg.Pool, draft_id: int,
                 if bal["balance"] - bal["reserved"] < 1:
                     return ClaimResult(False, "no_balance", d)
 
-            last = await _last_publication(conn, uid)
+            last = await _last_publication(conn, uid, d["fingerprint"])
             w = publication_window(last, None, now)
             if last is not None and now < last + COOLDOWN:
                 return ClaimResult(False, "cooldown", d, last_at=last, next_at=last + COOLDOWN)
@@ -799,6 +821,58 @@ async def get_overview(pool: asyncpg.Pool, user_id: int, now: Optional[datetime]
         "last_pub_at": last,
         "next_at": (last + COOLDOWN) if last and now < last + COOLDOWN else None,
     }
+
+
+async def get_publication_mode(pool: asyncpg.Pool, user_id: int) -> str:
+    async with pool.acquire() as conn:
+        mode = await conn.fetchval("SELECT publication_mode FROM users WHERE user_id=$1", user_id)
+    return mode or "manual"
+
+
+async def set_publication_mode(pool: asyncpg.Pool, user_id: int, mode: str) -> list[int]:
+    if mode not in ("auto", "manual"):
+        raise ValueError("invalid publication mode")
+    async with pool.acquire() as conn:
+        await conn.execute(
+            "INSERT INTO users (user_id, publication_mode) VALUES ($1,$2) "
+            "ON CONFLICT (user_id) DO UPDATE SET publication_mode=EXCLUDED.publication_mode, last_seen=now()",
+            user_id, mode)
+    return await auto_schedule_user(pool, user_id) if mode == "auto" else []
+
+
+async def auto_schedule_user(pool: asyncpg.Pool, user_id: int) -> list[int]:
+    now = utcnow(); now_local = to_local(now)
+    async with pool.acquire() as conn:
+        rows = await conn.fetch(
+            "SELECT * FROM drafts WHERE user_id=$1 AND status IN ('approved','publish_error') "
+            "AND scheduled_at IS NULL ORDER BY id", user_id)
+        existing = await conn.fetch(
+            "SELECT fingerprint, scheduled_at FROM drafts WHERE user_id=$1 "
+            "AND status IN ('approved','publish_error') AND scheduled_at IS NOT NULL", user_id)
+    last_by_fp: dict[str, datetime] = {}
+    for r in existing:
+        try:
+            dt = datetime.strptime(r["scheduled_at"], "%d.%m.%Y %H:%M"); fp = r["fingerprint"]
+            if fp and (fp not in last_by_fp or dt > last_by_fp[fp]): last_by_fp[fp] = dt
+        except (ValueError, TypeError): pass
+    scheduled=[]; n=len(rows)
+    if not n: return scheduled
+    async with pool.acquire() as conn:
+        for i,row in enumerate(rows):
+            deadline=draft_deadline(row,now)
+            if deadline<=now_local: continue
+            candidate=now_local+(deadline-now_local)*((i+1)/(n+1))
+            fp=row["fingerprint"]; previous=last_by_fp.get(fp) if fp else None
+            if previous is not None and candidate<previous+COOLDOWN: candidate=previous+COOLDOWN
+            if candidate<now_local: candidate=now_local
+            if candidate>=deadline: continue
+            scheduled_at=candidate.strftime("%d.%m.%Y %H:%M")
+            await conn.execute(
+                "UPDATE drafts SET scheduled_at=$2 WHERE id=$1 AND status IN ('approved','publish_error') "
+                "AND scheduled_at IS NULL", int(row["id"]), scheduled_at)
+            if fp: last_by_fp[fp]=candidate
+            scheduled.append(int(row["id"]))
+    return scheduled
 
 
 async def manual_adjust(pool: asyncpg.Pool, admin_id: int, user_id: int, delta: int,
