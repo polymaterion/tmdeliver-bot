@@ -435,6 +435,9 @@ async def init_db() -> None:
         await conn.execute(
             "ALTER TABLE users ADD COLUMN IF NOT EXISTS lang TEXT NOT NULL DEFAULT 'ru'"
         )
+        await conn.execute(
+            "ALTER TABLE users ADD COLUMN IF NOT EXISTS publication_mode TEXT NOT NULL DEFAULT 'manual'"
+        )
         # Групповые чаты с топиками и фильтром городов.
         # thread_id может быть NULL (обычный чат без топиков), поэтому его
         # нельзя включать в PRIMARY KEY — в PostgreSQL PK-колонки всегда NOT NULL.
