@@ -3116,19 +3116,22 @@ async def approve_draft_cb(callback: CallbackQuery, bot: Bot) -> None:
         await callback.message.edit_reply_markup(reply_markup=kb_admin(draft_id, approved=True))
     except Exception:
         pass
-    status_line = await _readiness_line(row)
-    await callback.message.reply(f"{raw('check')} Объявление #{draft_id} одобрено.\n{status_line}\n"
-                                 "Автоматически не публикуется — нажмите «📢 Опубликовать».")
     uid = int(row["user_id"])
     mode = await billing.get_publication_mode(pool(), uid)
     scheduled = await billing.auto_schedule_user(pool(), uid) if mode == "auto" else []
+    status_line = await _readiness_line(await get_draft(draft_id))
     if scheduled:
-        try:
-            await callback.message.reply(
-                f"Автоматическое расписание создано: {len(scheduled)} публикац. до дат поездки."
-            )
-        except Exception:
-            pass
+        await callback.message.reply(
+            f"{raw('check')} Объявление #{draft_id} одобрено.\n"
+            f"{status_line}\n"
+            f"Автоматически запланировано публикаций: {len(scheduled)}."
+        )
+    else:
+        await callback.message.reply(
+            f"{raw('check')} Объявление #{draft_id} одобрено.\n"
+            f"{status_line}\n"
+            "Для публикации нажмите «📢 Опубликовать» или «Отложить»."
+        )
 
 
 @router.callback_query(F.data.startswith("reject:"))
@@ -3474,8 +3477,9 @@ async def _package_warning(bot: Bot, user_id: int, lang: str, qty: int) -> tuple
         return None, False
     ov = await billing.get_overview(pool(), user_id)
     deadline = billing.draft_deadline(row)
+    draft_last = await billing.last_publication_for_draft(pool(), int(row["id"]))
     calc = billing.calc_usable_publications(
-        now=None, last_pub_at=ov["last_pub_at"], deadline_local=deadline,
+        now=None, last_pub_at=draft_last, deadline_local=deadline,
         free_available=ov["free_available"], balance_available=ov["available"], package_qty=qty,
     )
     if calc.fits:
