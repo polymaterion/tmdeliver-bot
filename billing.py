@@ -42,6 +42,7 @@ import hashlib
 import json
 import logging
 import math
+import os
 import re
 import uuid
 from dataclasses import dataclass
@@ -54,7 +55,9 @@ logger = logging.getLogger(__name__)
 
 # ── Конфигурация тарифов ─────────────────────────────────────────────────────
 PACKAGES: dict[int, int] = {2: 100, 5: 200}     # количество публикаций → цена, ₽
-COOLDOWN = timedelta(hours=24)
+# Повтор ОДИНАКОВОГО объявления — не чаще, чем раз в REPOST_COOLDOWN_HOURS (по умолчанию 24).
+# 0 — ограничение полностью отключено. Разные объявления друг друга не ограничивают.
+COOLDOWN = timedelta(hours=float(os.getenv("REPOST_COOLDOWN_HOURS", "24") or 0))
 
 def make_fingerprint(ad_type: str, cities: list[str], travel_date: str,
                      phone: str, custom_username: Optional[str]) -> str:
@@ -66,8 +69,11 @@ def make_fingerprint(ad_type: str, cities: list[str], travel_date: str,
     return hashlib.md5(raw.encode("utf-8")).hexdigest()
 
 
+# 'hold' — объявление принято по форме, но у пользователя нет доступных публикаций:
+# админу НЕ отправляется, ждёт покупки пакета (после оплаты уходит на модерацию).
+HOLD = "hold"
 OPEN_STATUSES = ("pending", "approved", "publishing", "publish_error")
-EDITABLE_STATUSES = ("pending", "approved", "publish_error")   # можно отклонить/отменить
+EDITABLE_STATUSES = ("hold", "pending", "approved", "publish_error")   # можно отклонить/отменить
 RETRIABLE_STATUSES = ("approved", "publish_error")             # можно публиковать
 
 TZ_OFFSET = 3
@@ -124,6 +130,7 @@ async def init_schema(pool: asyncpg.Pool) -> None:
                 ("status", "TEXT"),
                 ("funding", "TEXT"),
                 ("fingerprint", "TEXT"),
+                ("series_id", "INTEGER"),
                 ("published_at", "TIMESTAMPTZ"),
                 ("publishing_started_at", "TIMESTAMPTZ"),
                 ("status_changed_at", "TIMESTAMPTZ"),
@@ -174,6 +181,7 @@ async def init_schema(pool: asyncpg.Pool) -> None:
                 "CREATE INDEX IF NOT EXISTS ix_drafts_user_fingerprint_status "
                 "ON drafts (user_id, fingerprint, status)"
             )
+            await conn.execute("CREATE INDEX IF NOT EXISTS ix_drafts_series ON drafts (series_id) WHERE series_id IS NOT NULL")
             await conn.execute(
                 "CREATE INDEX IF NOT EXISTS ix_drafts_user_published ON drafts (user_id, published_at) "
                 "WHERE status='published'"
@@ -289,6 +297,8 @@ def publication_window(last_pub_at: Optional[datetime], deadline_local: Optional
     dl = local_to_utc(deadline_local)
     if next_at >= dl:
         return Window(next_at, 0)
+    if COOLDOWN <= timedelta(0):
+        return Window(next_at, None)            # ограничения нет — слотов сколько угодно
     return Window(next_at, math.ceil((dl - next_at) / COOLDOWN))
 
 
@@ -430,8 +440,46 @@ async def _apply_ledger(conn: asyncpg.Connection, *, user_id: int, delta: int, k
 
 # ── Черновики: создание и статусы ────────────────────────────────────────────
 
+async def _allocation(conn: asyncpg.Connection, uid: int, exclude_draft_id: Optional[int] = None,
+                      now: Optional[datetime] = None) -> tuple[bool, int]:
+    """
+    Что у пользователя ещё НЕ закреплено за другими заявками (вызывать под блокировкой баланса):
+      (бесплатное_место_свободно, число_свободных_платных_публикаций).
+    Заявки в процессе (pending/approved/publish_error) уже «держат» по одной публикации:
+    бесплатную (funding='free') или платную (funding='paid'); 'prepaid' уже списаны с баланса.
+    """
+    bal = await _lock_balance(conn, uid)
+    held_paid = await conn.fetchval(
+        "SELECT count(*) FROM drafts WHERE user_id=$1 AND funding='paid' "
+        "AND status IN ('pending','approved','publish_error') AND ($2::int IS NULL OR id<>$2)",
+        uid, exclude_draft_id)
+    free_open = await conn.fetchval(
+        "SELECT 1 FROM drafts WHERE user_id=$1 AND funding='free' "
+        "AND status IN ('pending','approved','publishing','publish_error') "
+        "AND ($2::int IS NULL OR id<>$2) LIMIT 1", uid, exclude_draft_id)
+    free_until = await _free_slot_until(conn, uid, exclude_draft_id=exclude_draft_id, now=now)
+    free_ok = free_open is None and free_until is None
+    return free_ok, max(0, bal["balance"] - bal["reserved"] - int(held_paid))
+
+
+async def get_availability(pool: asyncpg.Pool, user_id: int,
+                           exclude_draft_id: Optional[int] = None) -> tuple[bool, int]:
+    """
+    (бесплатное_место_свободно, свободных_платных) для экранов. Заявка exclude_draft_id
+    не считается занимающей публикацию — то есть «сколько доступно именно ей».
+    """
+    async with pool.acquire() as conn:
+        async with conn.transaction():
+            return await _allocation(conn, user_id, exclude_draft_id=exclude_draft_id)
+
+
 async def create_draft(pool: asyncpg.Pool, d: dict[str, Any]) -> int:
-    """Создаёт самостоятельное объявление; разные drafts друг друга не блокируют."""
+    """
+    Принимает объявление по обычной форме. Если у пользователя есть доступная публикация
+    (свободное бесплатное место либо платная на балансе) — status='pending' (уйдёт админу
+    на модерацию). Если доступных публикаций НЕТ — status='hold': объявление сохранено,
+    но админу не отправляется, пока пользователь не купит пакет (см. release_hold).
+    """
     cities = d["cities"]; uid = int(d["user_id"])
     ad_type = d.get("ad_type", "carrier"); travel_date = d["travel_date"]
     phone = d.get("phone", ""); custom_username = d.get("custom_username")
@@ -440,25 +488,63 @@ async def create_draft(pool: asyncpg.Pool, d: dict[str, Any]) -> int:
         async with conn.transaction():
             await _lock_balance(conn, uid)
             existing = await conn.fetchval(
-                "SELECT id FROM drafts WHERE user_id=$1 AND fingerprint=$2 AND status='pending' LIMIT 1",
+                "SELECT id FROM drafts WHERE user_id=$1 AND fingerprint=$2 AND status IN ('pending','hold') LIMIT 1",
                 uid, fingerprint)
             if existing is not None:
                 raise PendingDuplicate(int(existing))
-            free_open = await conn.fetchval(
-                "SELECT 1 FROM drafts WHERE user_id=$1 AND funding='free' "
-                "AND status IN ('pending','approved','publishing','publish_error') LIMIT 1", uid)
-            free_until = await _free_slot_until(conn, uid)
-            funding = "free" if free_open is None and free_until is None else "paid"
+            free_ok, paid_free = await _allocation(conn, uid)
+            if free_ok:
+                funding, status = "free", "pending"
+            elif paid_free >= 1:
+                funding, status = "paid", "pending"
+            else:
+                funding, status = "paid", HOLD
             row = await conn.fetchrow(
                 """INSERT INTO drafts
                    (user_id,tg_username,custom_username,full_name,origin,destination,route,
                     travel_date,cargo,phone,ad_type,status,funding,fingerprint,status_changed_at)
-                   VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,'pending',$12,$13,now())
+                   VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,now())
                    RETURNING id""",
                 uid,d.get("tg_username"),custom_username,d["full_name"],cities[0],cities[-1],
                 json.dumps(cities,ensure_ascii=False),travel_date,d["cargo"],phone,ad_type,
-                funding,fingerprint)
+                status,funding,fingerprint)
             return int(row["id"])
+
+
+async def release_hold(pool: asyncpg.Pool, draft_id: int, user_id: int) -> Optional[asyncpg.Record]:
+    """
+    После покупки пакета: 'hold' → 'pending' (теперь объявление можно отправлять админу).
+    Атомарно; None — объявление уже не в hold (повторный клик) или доступных публикаций всё ещё нет.
+    """
+    async with pool.acquire() as conn:
+        async with conn.transaction():
+            d = await conn.fetchrow(
+                "SELECT * FROM drafts WHERE id=$1 AND user_id=$2 AND status='hold' FOR UPDATE", draft_id, user_id)
+            if d is None:
+                return None
+            free_ok, paid_free = await _allocation(conn, user_id, exclude_draft_id=draft_id)
+            if free_ok:
+                funding = "free"
+            elif paid_free >= 1:
+                funding = "paid"
+            else:
+                return None
+            return await conn.fetchrow(
+                "UPDATE drafts SET status='pending', funding=$2, status_changed_at=now() WHERE id=$1 RETURNING *",
+                draft_id, funding)
+
+
+async def get_context_draft(pool: asyncpg.Pool, user_id: int) -> Optional[asyncpg.Record]:
+    """Последнее объявление, ради которого пользователь покупает публикации (hold или в процессе)."""
+    async with pool.acquire() as conn:
+        return await conn.fetchrow(
+            "SELECT * FROM drafts WHERE user_id=$1 AND status = ANY($2::text[]) ORDER BY (status='hold') DESC, id DESC LIMIT 1",
+            user_id, [HOLD, *OPEN_STATUSES])
+
+
+async def get_held_drafts(pool: asyncpg.Pool, user_id: int) -> list[asyncpg.Record]:
+    async with pool.acquire() as conn:
+        return await conn.fetch("SELECT * FROM drafts WHERE user_id=$1 AND status='hold' ORDER BY id", user_id)
 
 
 async def get_open_draft(pool: asyncpg.Pool, user_id: int) -> Optional[asyncpg.Record]:
@@ -473,7 +559,7 @@ async def get_open_drafts(pool: asyncpg.Pool, user_id: int, limit: int = 50) -> 
     async with pool.acquire() as conn:
         return await conn.fetch(
             "SELECT * FROM drafts WHERE user_id=$1 AND status = ANY($2::text[]) ORDER BY id DESC LIMIT $3",
-            user_id, list(OPEN_STATUSES), limit)
+            user_id, [HOLD, *OPEN_STATUSES], limit)
 
 
 async def get_user_drafts(pool: asyncpg.Pool, user_id: int, limit: int = 50) -> list[asyncpg.Record]:
@@ -483,16 +569,41 @@ async def get_user_drafts(pool: asyncpg.Pool, user_id: int, limit: int = 50) -> 
 
 async def _transition(pool: asyncpg.Pool, draft_id: int, new_status: str,
                       allowed: tuple[str, ...], user_id: Optional[int] = None) -> Optional[asyncpg.Record]:
-    """Атомарный переход статуса: сработает ровно один раз при гонке/повторе."""
+    """
+    Атомарный переход статуса: сработает ровно один раз при гонке/повторе.
+    Если объявление — часть серии автопубликаций (series_id), то в тот же статус
+    переводятся ВСЕ ещё не опубликованные её члены, а за каждую уже списанную,
+    но не вышедшую публикацию ('prepaid') баланс пополняется обратно (op_key refund:<id>).
+    """
     async with pool.acquire() as conn:
-        return await conn.fetchrow(
-            """
-            UPDATE drafts SET status=$2, status_changed_at=now(), scheduled_at=NULL
-            WHERE id=$1 AND status = ANY($3::text[]) AND ($4::bigint IS NULL OR user_id=$4)
-            RETURNING *
-            """,
-            draft_id, new_status, list(allowed), user_id,
-        )
+        async with conn.transaction():
+            target = await conn.fetchrow(
+                "SELECT * FROM drafts WHERE id=$1 AND status = ANY($2::text[]) "
+                "AND ($3::bigint IS NULL OR user_id=$3) FOR UPDATE",
+                draft_id, list(allowed), user_id,
+            )
+            if target is None:
+                return None
+            group = [target]
+            if target["series_id"] is not None:
+                group = await conn.fetch(
+                    "SELECT * FROM drafts WHERE series_id=$1 AND status = ANY($2::text[]) ORDER BY id FOR UPDATE",
+                    target["series_id"], list(allowed),
+                )
+            if new_status in ("rejected", "cancelled"):
+                await _lock_balance(conn, int(target["user_id"]))
+            for g in group:
+                await conn.execute(
+                    "UPDATE drafts SET status=$2, status_changed_at=now(), scheduled_at=NULL WHERE id=$1",
+                    int(g["id"]), new_status,
+                )
+                if g["funding"] == "prepaid" and new_status in ("rejected", "cancelled"):
+                    await _apply_ledger(
+                        conn, user_id=int(g["user_id"]), delta=1, kind="refund",
+                        op_key=f"refund:{g['id']}", draft_id=int(g["id"]),
+                        reason="Публикация возвращена: объявление не было опубликовано",
+                    )
+            return await conn.fetchrow("SELECT * FROM drafts WHERE id=$1", draft_id)
 
 
 async def approve_draft(pool: asyncpg.Pool, draft_id: int) -> Optional[asyncpg.Record]:
@@ -579,9 +690,11 @@ async def claim_publication(pool: asyncpg.Pool, draft_id: int,
             if funding == "free":
                 if await _free_slot_until(conn, uid, exclude_draft_id=draft_id, now=now) is not None:
                     return ClaimResult(False, "no_free", d)
-            else:
+            elif funding == "paid":
                 if bal["balance"] - bal["reserved"] < 1:
                     return ClaimResult(False, "no_balance", d)
+            # funding == 'prepaid': публикация уже оплачена (списана при распределении) —
+            # баланс и бесплатное место не проверяются и не затрагиваются.
 
             last = await _last_publication(conn, uid, d["fingerprint"])
             w = publication_window(last, None, now)
@@ -836,6 +949,12 @@ async def get_publication_mode(pool: asyncpg.Pool, user_id: int) -> str:
 
 
 async def set_publication_mode(pool: asyncpg.Pool, user_id: int, mode: str) -> list[int]:
+    """
+    Только запоминает режим пользователя ('auto' | 'manual'). Ничего не планирует и не
+    списывает: в автоматическом режиме распределение выполняется при одобрении объявления
+    (auto_distribute), в ручном — каждое объявление пользователь отправляет сам.
+    Возвращает [] (оставлено для совместимости со старым API).
+    """
     if mode not in ("auto", "manual"):
         raise ValueError("invalid publication mode")
     async with pool.acquire() as conn:
@@ -843,50 +962,107 @@ async def set_publication_mode(pool: asyncpg.Pool, user_id: int, mode: str) -> l
             "INSERT INTO users (user_id, publication_mode) VALUES ($1,$2) "
             "ON CONFLICT (user_id) DO UPDATE SET publication_mode=EXCLUDED.publication_mode, last_seen=now()",
             user_id, mode)
-    if mode == "auto":
-        return await auto_schedule_user(pool, user_id)
-    async with pool.acquire() as conn:
-        await conn.execute(
-            "UPDATE drafts SET scheduled_at=NULL "
-            "WHERE user_id=$1 AND status IN ('approved','publish_error')",
-            user_id,
-        )
     return []
 
 
-async def auto_schedule_user(pool: asyncpg.Pool, user_id: int) -> list[int]:
-    now = utcnow(); now_local = to_local(now)
+def plan_series(*, now: datetime, last_pub_at: Optional[datetime], deadline_local: Optional[datetime],
+                total: int) -> list[datetime]:
+    """
+    Моменты публикаций (aware UTC) для `total` ОДИНАКОВЫХ объявлений, равномерно до даты вылета:
+    окно [старт, дедлайн] делится на count равных частей, по одной публикации в начале каждой.
+    Интервал между одинаковыми публикациями не меньше COOLDOWN, поэтому если окно короткое,
+    count уменьшается (остаток публикаций остаётся на балансе). Первая — сразу (или когда
+    закончится cooldown от предыдущей такой же публикации).
+    """
+    if total <= 0:
+        return []
+    w = publication_window(last_pub_at, deadline_local, now)
+    if w.slots == 0:
+        return []
+    count = total if w.slots is None else min(total, w.slots)
+    start = w.next_at
+    if count == 1 or deadline_local is None:
+        step = max(COOLDOWN, timedelta(hours=1)) if count > 1 else timedelta(0)
+    else:
+        window = local_to_utc(deadline_local) - start
+        step = max(window / count, COOLDOWN)
+    return [start + step * i for i in range(count)]
+
+
+def _fmt_sched(dt: datetime) -> str:
+    """aware UTC → 'DD.MM.YYYY HH:MM' (местное, округление вверх до минуты)."""
+    return (to_local(dt) + timedelta(seconds=59)).strftime("%d.%m.%Y %H:%M")
+
+
+async def auto_distribute(pool: asyncpg.Pool, draft_id: int,
+                          now: Optional[datetime] = None) -> dict[str, Any]:
+    """
+    Автоматический режим, вызывается при одобрении объявления модератором.
+    ВСЕ доступные пользователю публикации (бесплатная + свободные платные) превращаются
+    в серию одинаковых объявлений, равномерно распределённых до даты вылета; списываются
+    с баланса сразу одной операцией (op_key auto:<id>). Публикации, которые не помещаются
+    по интервалу (cooldown одинаковых объявлений), остаются на балансе.
+    Возвращает {'result': 'scheduled'|'no_slots'|'skip', 'ids', 'times', 'total', 'debited'}.
+    Повторный вызов безопасен ('skip').
+    """
+    now = now or utcnow()
     async with pool.acquire() as conn:
-        rows = await conn.fetch(
-            "SELECT * FROM drafts WHERE user_id=$1 AND status IN ('approved','publish_error') "
-            "AND scheduled_at IS NULL ORDER BY id", user_id)
-        existing = await conn.fetch(
-            "SELECT fingerprint, scheduled_at FROM drafts WHERE user_id=$1 "
-            "AND status IN ('approved','publish_error') AND scheduled_at IS NOT NULL", user_id)
-    last_by_fp: dict[str, datetime] = {}
-    for r in existing:
-        try:
-            dt = datetime.strptime(r["scheduled_at"], "%d.%m.%Y %H:%M"); fp = r["fingerprint"]
-            if fp and (fp not in last_by_fp or dt > last_by_fp[fp]): last_by_fp[fp] = dt
-        except (ValueError, TypeError): pass
-    scheduled=[]; n=len(rows)
-    if not n: return scheduled
-    async with pool.acquire() as conn:
-        for i,row in enumerate(rows):
-            deadline=draft_deadline(row,now)
-            if deadline<=now_local: continue
-            candidate=now_local+(deadline-now_local)*((i+1)/(n+1))
-            fp=row["fingerprint"]; previous=last_by_fp.get(fp) if fp else None
-            if previous is not None and candidate<previous+COOLDOWN: candidate=previous+COOLDOWN
-            if candidate<now_local: candidate=now_local
-            if candidate>=deadline: continue
-            scheduled_at=candidate.strftime("%d.%m.%Y %H:%M")
+        async with conn.transaction():
+            d = await conn.fetchrow("SELECT * FROM drafts WHERE id=$1 FOR UPDATE", draft_id)
+            if d is None or d["status"] != "approved" or d["series_id"] is not None or d["scheduled_at"]:
+                return {"result": "skip"}
+            uid = int(d["user_id"])
+            free_ok, paid_free = await _allocation(conn, uid, exclude_draft_id=draft_id, now=now)
+            own_free = d["funding"] == "free"
+            # paid_free посчитан БЕЗ учёта заявки draft_id, поэтому для платного объявления
+            # он уже включает его собственную публикацию; бесплатное добавляет ещё одну.
+            total = (1 if own_free else 0) + paid_free
+            if total < 1 or (not own_free and paid_free < 1):
+                return {"result": "skip"}
+            last = await _last_publication(conn, uid, d["fingerprint"])
+            times = plan_series(now=now, last_pub_at=last, deadline_local=draft_deadline(d, now), total=total)
+            if not times:
+                return {"result": "no_slots", "ids": [], "times": [], "total": total, "debited": 0}
+            count = len(times)
+            debit = count - (1 if own_free else 0)
+            if debit > 0:
+                await _apply_ledger(
+                    conn, user_id=uid, delta=-debit, kind="auto_spend", op_key=f"auto:{draft_id}",
+                    draft_id=draft_id, reason=f"Автораспределение: {count} публ. до даты поездки",
+                )
+            ids = [draft_id]
             await conn.execute(
-                "UPDATE drafts SET scheduled_at=$2 WHERE id=$1 AND status IN ('approved','publish_error') "
-                "AND scheduled_at IS NULL", int(row["id"]), scheduled_at)
-            if fp: last_by_fp[fp]=candidate
-            scheduled.append(int(row["id"]))
-    return scheduled
+                "UPDATE drafts SET series_id=$1, scheduled_at=$2, funding=$3, status_changed_at=now() WHERE id=$1",
+                draft_id, _fmt_sched(times[0]), "free" if own_free else "prepaid")
+            for t_i in times[1:]:
+                new_id = await conn.fetchval(
+                    """INSERT INTO drafts
+                       (user_id,tg_username,custom_username,full_name,origin,destination,route,
+                        travel_date,cargo,phone,ad_type,status,funding,fingerprint,series_id,
+                        scheduled_at,status_changed_at)
+                       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,'approved','prepaid',$12,$13,$14,now())
+                       RETURNING id""",
+                    uid, d["tg_username"], d["custom_username"], d["full_name"], d["origin"],
+                    d["destination"], d["route"], d["travel_date"], d["cargo"], d["phone"],
+                    d["ad_type"], d["fingerprint"], draft_id, _fmt_sched(t_i))
+                ids.append(int(new_id))
+            return {"result": "scheduled", "ids": ids, "times": times, "total": total, "debited": max(debit, 0)}
+
+
+async def series_info(pool: asyncpg.Pool, series_id: int) -> dict[str, Any]:
+    """Сколько публикаций серии вышло и сколько осталось, ближайшая по времени."""
+    async with pool.acquire() as conn:
+        rows = await conn.fetch("SELECT status, scheduled_at FROM drafts WHERE series_id=$1", series_id)
+    done = sum(1 for r in rows if r["status"] == "published")
+    left = [r for r in rows if r["status"] in ("approved", "publish_error", "publishing")]
+    nxt = None
+    for r in left:
+        try:
+            dt = datetime.strptime(r["scheduled_at"], "%d.%m.%Y %H:%M")
+            nxt = dt if nxt is None or dt < nxt else nxt
+        except (ValueError, TypeError):
+            pass
+    return {"total": len(rows), "done": done, "left": len(left), "next": nxt}
 
 
 async def manual_adjust(pool: asyncpg.Pool, admin_id: int, user_id: int, delta: int,
@@ -928,7 +1104,8 @@ async def queue_ready(pool: asyncpg.Pool, limit: int = 20) -> list[asyncpg.Recor
     """Админская очередь: одобренные объявления, готовые к ручной публикации."""
     async with pool.acquire() as conn:
         return await conn.fetch(
-            "SELECT * FROM drafts WHERE status = ANY($2::text[]) ORDER BY id LIMIT $1",
+            "SELECT * FROM drafts WHERE status = ANY($2::text[]) "
+            "AND NOT (series_id IS NOT NULL AND scheduled_at IS NOT NULL) ORDER BY id LIMIT $1",
             limit, list(RETRIABLE_STATUSES),
         )
 
@@ -937,3 +1114,23 @@ async def queue_pending(pool: asyncpg.Pool, limit: int = 20) -> list[asyncpg.Rec
     """Объявления на модерации (ещё не одобрены) — для /queue после обновления/потери сообщений."""
     async with pool.acquire() as conn:
         return await conn.fetch("SELECT * FROM drafts WHERE status='pending' ORDER BY id LIMIT $1", limit)
+
+
+async def cancel_payment(pool: asyncpg.Pool, payment_id: int, user_id: int) -> tuple[str, Optional[asyncpg.Record]]:
+    """
+    Пользователь закрывает заявку на оплату. Можно, пока чек не ушёл на проверку
+    (awaiting_receipt) или после отклонения чека (rejected). Возвращает (код, заявка):
+    'cancelled' | 'under_review' | 'confirmed' | 'already' | 'not_found'.
+    """
+    async with pool.acquire() as conn:
+        async with conn.transaction():
+            p = await conn.fetchrow("SELECT * FROM payments WHERE id=$1 AND user_id=$2 FOR UPDATE", payment_id, user_id)
+            if p is None:
+                return "not_found", None
+            st = p["status"]
+            if st in ("awaiting_receipt", "rejected"):
+                p = await conn.fetchrow(
+                    "UPDATE payments SET status='cancelled', updated_at=now() WHERE id=$1 RETURNING *", payment_id)
+                return "cancelled", p
+            return {"receipt_received": "under_review", "confirmed": "confirmed", "cancelled": "already"}.get(st, "already"), p
+

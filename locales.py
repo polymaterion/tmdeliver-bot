@@ -238,6 +238,60 @@ TEXTS: dict[str, dict[str, str]] = {
         "ad_sent_for_review":   "✅ Объявление отправлено на публикацию.",
         "ad_rejected":          "❌ Объявление не прошло модерацию.",
 
+        # ── Правки: hold, экран оплаты, режимы ──────────────────────────────
+        "cancel_done_refund": "🗑 Объявление отменено. Невышедшие публикации возвращены на баланс.",
+        "btn_requisites": "📋 Реквизиты",
+        "dup_pending": "Такое объявление уже находится на проверке.",
+        "dup_hold":    "Такое объявление уже сохранено и ждёт покупки публикаций.",
+        "btn_status_short": "📋 Мои заявки",
+        "ad_hold": (
+            "📝 Объявление принято, но доступных публикаций нет — на проверку оно пока не отправлено.\n\n"
+            "Купите пакет: после оплаты выберите режим, и объявление уйдёт на проверку."
+        ),
+        "btn_buy_short":     "💳 Купить публикации",
+        "btn_paid":          "✅ Я оплатил",
+        "btn_cancel_pay":    "❌ Отмена",
+        "pay_send_receipt":  "🧾 Отправьте фото или файл чека по заявке #{id} в этот чат.",
+        "pay_cancelled":     "❌ Заявка #{id} отменена.",
+        "pay_cancel_review": "Чек уже отправлен на проверку — отменить заявку нельзя.",
+        "pay_cancel_done_already": "Заявка уже закрыта.",
+        "pay_already_review": "Чек уже получен, ожидайте проверки администратором.",
+        "pay_already_confirmed": "Эта заявка уже оплачена.",
+        "pay_closed":        "Заявка закрыта.",
+        "pay_screen": (
+            "💳 Заявка #{id} · {qty} {word} · {price} ₽\n\n"
+            "Карта для перевода:\n<code>{card}</code>{holder}\n\n"
+            "После перевода нажмите «Я оплатил» и отправьте чек."
+        ),
+        "mode_prompt": (
+            "Выберите режим публикации:\n\n"
+            "🤖 Автоматически — объявление проверяется один раз, все доступные публикации "
+            "равномерно распределяются до даты поездки и сразу списываются с баланса.\n\n"
+            "✋ Вручную — каждый раз отправляйте объявление на проверку через форму; "
+            "публикация списывается, когда объявление выходит в канал."
+        ),
+        "btn_mode_auto":   "🤖 Автоматически",
+        "btn_mode_manual": "✋ Вручную",
+        "mode_saved_auto":   "🤖 Режим: автоматический.",
+        "mode_saved_manual": "✋ Режим: ручной.",
+        "mode_sent_review":  "Объявление #{id} отправлено на проверку.",
+        "mode_auto_after":   "После одобрения публикации распределятся до даты поездки.",
+        "mode_auto_partial": "До даты поездки успеют выйти {usable} из {total} {word}: одинаковое объявление можно публиковать не чаще 1 раза в {hours} ч. Остальные останутся на балансе.",
+        "mode_manual_after": "Для следующего объявления заполните форму заново.",
+        "mode_no_draft":     "Заполните форму объявления, когда будете готовы.",
+        "mode_already":      "Режим уже выбран.",
+        "auto_scheduled_user": (
+            "✅ Объявление одобрено. Запланировано публикаций: {count}, списано с баланса: {debited}.\n\n{times}"
+        ),
+        "auto_no_slots_user": "✅ Объявление одобрено, но до даты поездки не осталось времени на публикацию.",
+        "buy_warning": (
+            "⚠️ Дата поездки близко — осталось: {days_text}.\n\n"
+            "Одинаковое объявление можно публиковать не чаще 1 раза в {hours} ч, "
+            "поэтому до вылета успеют выйти {usable} из {qty} {word}.\n\n"
+            "Остальные сохранятся на балансе для будущих объявлений."
+        ),
+        "status_hold": "Статус: ждёт покупки публикаций (на проверку не отправлено)",
+
         # ── Публикации, оплата, очередь (freemium) ──────────────────────────
         "btn_buy":              "💳 Дополнительные публикации",
         "btn_status":           "📋 Посмотреть статус",
@@ -251,26 +305,10 @@ TEXTS: dict[str, dict[str, str]] = {
         "btn_pkg":              "{qty} {word} — {price} ₽",
         "btn_buy_pkg":          "Купить {qty} {word} — {price} ₽",
         "btn_other_pkg":        "Выбрать другой пакет",
-        "buy_warning": (
-            "⚠️ До вашей поездки осталось {days_text}.\n\n"
-            "По правилам канала можно публиковать не более 1 объявления за 24 часа.\n\n"
-            "Вы не успеете использовать все {qty} {word} до вылета.\n\n"
-            "Вы можете купить пакет и сохранить оставшиеся публикации для будущих объявлений."
-        ),
         "trip_passed_no_pay": (
             "⚠️ Дата поездки в вашем объявлении уже прошла, поэтому опубликовать его нельзя, "
             "и оплата для него не требуется.\n\n"
             "Создайте объявление с актуальной датой поездки."
-        ),
-        "pay_screen": (
-            "💳 Оплата публикаций\n\n"
-            "Заявка: #{id}\n"
-            "Пакет: {qty} {word}\n"
-            "Сумма: {price} ₽\n\n"
-            "Переведите {price} ₽ на карту:\n\n"
-            "<code>{card}</code>{holder}\n\n"
-            "После перевода отправьте чек (фото или файл) в этот бот.\n\n"
-            "После проверки оплаты администратором публикации будут начислены на ваш баланс."
         ),
         "pay_no_card":          "⚠️ Реквизиты для оплаты временно не настроены. Напишите в поддержку.",
         "pay_receipt_received": "🧾 Чек по заявке #{id} получен. Администратор проверит оплату — мы сообщим о результате.",
@@ -322,7 +360,7 @@ TEXTS: dict[str, dict[str, str]] = {
         "ad_rejected_paid_note": "Ваши купленные публикации сохранены на балансе.",
         "unit_day_1": "день", "unit_day_2": "дня", "unit_day_5": "дней",
         "unit_pub_1": "публикация", "unit_pub_2": "публикации", "unit_pub_5": "публикаций",
-        "today_word":           "сегодня",
+        "today_word":           "менее суток",
 
         # ── Защита от повторных объявлений ──────────────────────────────────
         "duplicate_found": (
@@ -464,6 +502,60 @@ TEXTS: dict[str, dict[str, str]] = {
         "ad_sent_for_review":   "✅ Bildiriş barlaga iberildi.",
         "ad_rejected":          "❌ Bildiriş barlagdan geçmedi.",
 
+        # ── Düzedişler: hold, töleg ekrany, režimler ───────────────────────
+        "cancel_done_refund": "🗑 Bildiriş ýatyryldy. Çykmadyk çap etmeler balansa gaýtaryldy.",
+        "btn_requisites": "📋 Maglumatlar",
+        "dup_pending": "Şeýle bildiriş eýýäm barlagda.",
+        "dup_hold":    "Şeýle bildiriş saklanyp, çap etmeleri satyn almagyňyza garaşýar.",
+        "btn_status_short": "📋 Arzalarym",
+        "ad_hold": (
+            "📝 Bildiriş kabul edildi, ýöne elýeterli çap etme ýok — barlaga entek iberilmedi.\n\n"
+            "Paket satyn alyň: tölegden soň režim saýlaň, bildiriş barlaga gider."
+        ),
+        "btn_buy_short":     "💳 Çap etme satyn al",
+        "btn_paid":          "✅ Tölänim",
+        "btn_cancel_pay":    "❌ Ýatyr",
+        "pay_send_receipt":  "🧾 #{id} arza boýunça çegiň suratyny ýa-da faýlyny şu çata iberiň.",
+        "pay_cancelled":     "❌ #{id} arza ýatyryldy.",
+        "pay_cancel_review": "Çek barlaga iberildi — arzany ýatyryp bolmaýar.",
+        "pay_cancel_done_already": "Arza eýýäm ýapyldy.",
+        "pay_already_review": "Çek alyndy, administratoryň barlagyna garaşyň.",
+        "pay_already_confirmed": "Bu arza eýýäm tölenen.",
+        "pay_closed":        "Arza ýapyldy.",
+        "pay_screen": (
+            "💳 Arza #{id} · {qty} {word} · {price} ₽\n\n"
+            "Geçirmek üçin kart:\n<code>{card}</code>{holder}\n\n"
+            "Geçirenden soň «Tölänim» düwmesine basyp, çegi iberiň."
+        ),
+        "mode_prompt": (
+            "Çap etme režimini saýlaň:\n\n"
+            "🤖 Awtomatik — bildiriş bir gezek barlanýar, ähli elýeterli çap etmeler "
+            "sapar senesine çenli deň paýlanýar we balansdan birbada hasapdan çykarylýar.\n\n"
+            "✋ El bilen — her gezek bildirişi forma arkaly özüňiz barlaga iberýärsiňiz; "
+            "çap etme bildiriş kanala çykanda hasapdan çykarylýar."
+        ),
+        "btn_mode_auto":   "🤖 Awtomatik",
+        "btn_mode_manual": "✋ El bilen",
+        "mode_saved_auto":   "🤖 Režim: awtomatik.",
+        "mode_saved_manual": "✋ Režim: el bilen.",
+        "mode_sent_review":  "#{id} bildiriş barlaga iberildi.",
+        "mode_auto_after":   "Makullanyndan soň çap etmeler sapar senesine çenli paýlanar.",
+        "mode_auto_partial": "Sapar senesine çenli {total} {word} içinden {usable} çykyp ýetişer: birmeňzeş bildirişi {hours} sagatda 1 gezekden köp çap edip bolmaýar. Galanlary balansda galar.",
+        "mode_manual_after": "Indiki bildiriş üçin formany täzeden dolduryň.",
+        "mode_no_draft":     "Taýyn bolanyňyzda bildiriş formasyny dolduryň.",
+        "mode_already":      "Režim eýýäm saýlanyldy.",
+        "auto_scheduled_user": (
+            "✅ Bildiriş makullandy. Meýilleşdirilen çap etmeler: {count}, balansdan hasapdan çykaryldy: {debited}.\n\n{times}"
+        ),
+        "auto_no_slots_user": "✅ Bildiriş makullandy, ýöne sapar senesine çenli çap etmäge wagt galmady.",
+        "buy_warning": (
+            "⚠️ Sapar wagty ýakyn — galdy: {days_text}.\n\n"
+            "Birmeňzeş bildirişi {hours} sagatda 1 gezekden köp çap edip bolmaýar, "
+            "şonuň üçin uçuşa çenli {qty} {word} içinden {usable} çykyp ýetişer.\n\n"
+            "Galanlary indiki bildirişler üçin balansda saklanar."
+        ),
+        "status_hold": "Ýagdaý: çap etme satyn almaga garaşýar (barlaga iberilmedi)",
+
         # ── Çap etmeler, töleg, nobat (freemium) ────────────────────────────
         "btn_buy":              "💳 Goşmaça çap etmeler",
         "btn_status":           "📋 Ýagdaýy görmek",
@@ -477,25 +569,9 @@ TEXTS: dict[str, dict[str, str]] = {
         "btn_pkg":              "{qty} {word} — {price} ₽",
         "btn_buy_pkg":          "Satyn al: {qty} {word} — {price} ₽",
         "btn_other_pkg":        "Başga paket saýla",
-        "buy_warning": (
-            "⚠️ Sapara çenli {days_text} galdy.\n\n"
-            "Kanalyň düzgünlerine görä 24 sagatda 1 bildirişden köp çap edip bolmaýar.\n\n"
-            "Uçuşa çenli {qty} {word} hemmesini ulanyp ýetişmersiňiz.\n\n"
-            "Paketi satyn alyp, galanlaryny indiki bildirişler üçin saklap bilersiňiz."
-        ),
         "trip_passed_no_pay": (
             "⚠️ Bildirişdäki saparyň senesi geçdi, şonuň üçin ony çap edip bolmaýar we töleg gerek däl.\n\n"
             "Täze senesi bilen bildiriş dörediň."
-        ),
-        "pay_screen": (
-            "💳 Çap etmeleriň tölegi\n\n"
-            "Arza: #{id}\n"
-            "Paket: {qty} {word}\n"
-            "Mukdar: {price} ₽\n\n"
-            "{price} ₽ şu karta geçiriň:\n\n"
-            "<code>{card}</code>{holder}\n\n"
-            "Geçirenden soň çegi (surat ýa-da faýl) şu bota iberiň.\n\n"
-            "Administrator tölegi barlanyndan soň çap etmeler balansyňyza goşular."
         ),
         "pay_no_card":          "⚠️ Töleg maglumatlary wagtlaýyn sazlanmady. Goldawa ýazyň.",
         "pay_receipt_received": "🧾 #{id} arza boýunça çek alyndy. Administrator barlar — netijäni habar bereris.",
@@ -547,7 +623,7 @@ TEXTS: dict[str, dict[str, str]] = {
         "ad_rejected_paid_note": "Satyn alan çap etmeleriňiz balansda saklandy.",
         "unit_day_1": "gün", "unit_day_2": "gün", "unit_day_5": "gün",
         "unit_pub_1": "çap etme", "unit_pub_2": "çap etme", "unit_pub_5": "çap etme",
-        "today_word":           "şu gün",
+        "today_word":           "bir günden az",
 
         # ── Gaýtalanýan bildirişlerden goragy ────────────────────────────────
         "duplicate_found": (
