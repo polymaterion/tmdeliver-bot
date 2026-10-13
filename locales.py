@@ -238,15 +238,14 @@ TEXTS: dict[str, dict[str, str]] = {
         "ad_sent_for_review":   "✅ Объявление отправлено на публикацию.",
         "ad_rejected":          "❌ Объявление не прошло модерацию.",
 
-        # ── Правки: hold, экран оплаты, режимы ──────────────────────────────
-        "cancel_done_refund": "🗑 Объявление отменено. Невышедшие публикации возвращены на баланс.",
+        # ── Объявление без доступных публикаций, оплата переводом ───────────
         "btn_requisites": "📋 Реквизиты",
         "dup_pending": "Такое объявление уже находится на проверке.",
         "dup_hold":    "Такое объявление уже сохранено и ждёт покупки публикаций.",
         "btn_status_short": "📋 Мои заявки",
         "ad_hold": (
             "📝 Объявление принято, но доступных публикаций нет — на проверку оно пока не отправлено.\n\n"
-            "Купите пакет: после оплаты выберите режим, и объявление уйдёт на проверку."
+            "Купите пакет — после подтверждения оплаты объявление уйдёт на проверку само."
         ),
         "btn_buy_short":     "💳 Купить публикации",
         "btn_paid":          "✅ Я оплатил",
@@ -257,54 +256,17 @@ TEXTS: dict[str, dict[str, str]] = {
         "pay_cancel_done_already": "Заявка уже закрыта.",
         "pay_already_review": "Чек уже получен, ожидайте проверки администратором.",
         "pay_already_confirmed": "Эта заявка уже оплачена.",
-        "pay_closed":        "Заявка закрыта.",
         "pay_screen": (
             "💳 Заявка #{id} · {qty} {word} · {price} ₽\n\n"
             "Карта для перевода:\n<code>{card}</code>{holder}\n\n"
             "После перевода нажмите «Я оплатил» и отправьте чек."
         ),
-        "mode_prompt": (
-            "Выберите режим публикации:\n\n"
-            "🤖 Автоматически — объявление проверяется один раз, все доступные публикации "
-            "равномерно распределяются до даты поездки и сразу списываются с баланса.\n\n"
-            "✋ Вручную — каждый раз отправляйте объявление на проверку через форму; "
-            "публикация списывается, когда объявление выходит в канал."
-        ),
-        "btn_mode_auto":   "🤖 Автоматически",
-        "btn_mode_manual": "✋ Вручную",
-        "mode_saved_auto":   "🤖 Режим: автоматический.",
-        "mode_saved_manual": "✋ Режим: ручной.",
-        "mode_sent_review":  "Объявление #{id} отправлено на проверку.",
-        "mode_auto_after":   "После одобрения публикации распределятся до даты поездки.",
-        "mode_auto_partial": "До даты поездки успеют выйти {usable} из {total} {word}: одинаковое объявление можно публиковать не чаще 1 раза в {hours} ч. Остальные останутся на балансе.",
-        "mode_manual_after": "Для следующего объявления заполните форму заново.",
-        "mode_no_draft":     "Заполните форму объявления, когда будете готовы.",
-        "mode_already":      "Режим уже выбран.",
-        "auto_scheduled_user": (
-            "✅ Объявление одобрено. Запланировано публикаций: {count}, списано с баланса: {debited}.\n\n{times}"
-        ),
-        "auto_no_slots_user": "✅ Объявление одобрено, но до даты поездки не осталось времени на публикацию.",
-        "buy_warning": (
-            "⚠️ Дата поездки близко — осталось: {days_text}.\n\n"
-            "Одинаковое объявление можно публиковать не чаще 1 раза в {hours} ч, "
-            "поэтому до вылета успеют выйти {usable} из {qty} {word}.\n\n"
-            "Остальные сохранятся на балансе для будущих объявлений."
-        ),
-        "status_hold": "Статус: ждёт покупки публикаций (на проверку не отправлено)",
 
-        # ── Публикации, оплата, очередь (freemium) ──────────────────────────
+        # ── Баланс публикаций, статус, отмена ───────────────────────────────
         "btn_buy":              "💳 Дополнительные публикации",
-        "btn_status":           "📋 Посмотреть статус",
-        "btn_cancel_short":     "Отмена",
         "btn_close":            "Закрыть",
-        "open_draft_block": (
-            "⏳ У вас уже есть объявление, которое ожидает проверки или публикации.\n\n"
-            "Дождитесь завершения текущей заявки, прежде чем отправлять новое объявление."
-        ),
         "buy_menu":             "💳 Дополнительные публикации\n\nВыберите пакет:",
         "btn_pkg":              "{qty} {word} — {price} ₽",
-        "btn_buy_pkg":          "Купить {qty} {word} — {price} ₽",
-        "btn_other_pkg":        "Выбрать другой пакет",
         "trip_passed_no_pay": (
             "⚠️ Дата поездки в вашем объявлении уже прошла, поэтому опубликовать его нельзя, "
             "и оплата для него не требуется.\n\n"
@@ -322,33 +284,12 @@ TEXTS: dict[str, dict[str, str]] = {
         ),
         "btn_resend_receipt":   "🧾 Отправить чек повторно",
         "btn_new_payment":      "💳 Новая заявка",
-        "pay_resend_prompt":    "🧾 Отправьте чек по заявке #{id} (фото или файл) в этот чат.",
-        "ad_approved_user":     "✅ Ваше объявление одобрено и готово к публикации. Администратор опубликует его в ближайшее время.",
-        "ad_waiting_payment_user": (
-            "💳 Объявление ожидает оплаты: бесплатная публикация сейчас занята, "
-            "а платных публикаций на балансе нет.\n\nКупите пакет — объявление останется в очереди."
-        ),
         "ad_published_paid_note": "Списана 1 платная публикация. Осталось на балансе: {balance}.",
-        "btn_create_new":       "✏️ Создать объявление",
-        "status_head":          "📋 Ваше объявление #{id}",
-        "status_pending":       "Статус: на проверке у модератора",
-        "status_approved":      "Статус: одобрено, ожидает публикации администратором",
-        "status_publishing":    "Статус: публикуется…",
-        "status_publish_error": "Статус: ошибка публикации — администратор повторит попытку",
-        "status_waiting_payment": "Ожидает оплаты: нет свободной бесплатной публикации и платных на балансе.",
-        "status_funding_free":  "Тип публикации: бесплатная",
-        "status_funding_paid":  "Тип публикации: платная",
         "status_balance":       "Платных публикаций на балансе: {n}",
-        "status_next_at":       "Следующая публикация доступна с: {dt}",
         "status_no_open":       "У вас нет объявлений в очереди.",
         "btn_cancel_ad":        "🗑 Отменить объявление",
-        "btn_use_paid":         "💳 Использовать платную публикацию",
-        "btn_use_free":         "🎁 Использовать бесплатную публикацию",
         "cancel_done":          "🗑 Объявление отменено. Публикации на балансе не затронуты.",
         "cancel_failed":        "Это объявление уже нельзя отменить.",
-        "funding_changed":      "✅ Тип публикации изменён.",
-        "funding_free_taken":   "Бесплатная публикация сейчас занята активным объявлением.",
-        "funding_no_balance":   "На балансе нет платных публикаций.",
         "balance_text": (
             "💼 Ваши публикации\n\n"
             "Платных на балансе: {balance}\n"
@@ -358,20 +299,8 @@ TEXTS: dict[str, dict[str, str]] = {
         "balance_free_no":      "занята активным объявлением до {dt}",
         "manual_credit_user":   "🎁 Администратор изменил ваш баланс публикаций: {delta:+d}. Доступно: {balance}.",
         "ad_rejected_paid_note": "Ваши купленные публикации сохранены на балансе.",
-        "unit_day_1": "день", "unit_day_2": "дня", "unit_day_5": "дней",
         "unit_pub_1": "публикация", "unit_pub_2": "публикации", "unit_pub_5": "публикаций",
-        "today_word":           "менее суток",
 
-        # ── Защита от повторных объявлений ──────────────────────────────────
-        "duplicate_found": (
-            "🔁 У вас уже есть точно такое же активное объявление — тот же "
-            "маршрут, дата и контакты.\n\n"
-            "Вместо создания дубликата можно просто повторить (переопубликовать) "
-            "уже существующее объявление — оно снова окажется свежим в канале."
-        ),
-        "btn_repeat_ad":        "🔁 Повторить объявление",
-        "ad_repeated":          "✅ Объявление повторно опубликовано.",
-        "ad_repeat_failed":     "❌ Не получилось повторить объявление. Попробуйте ещё раз позже.",
         "ad_published_thanks": (
             "🎉 Ваше объявление опубликовано.\n\n"
             "Хотите оставить отзыв? Может есть предложения или замечания? "
@@ -502,15 +431,14 @@ TEXTS: dict[str, dict[str, str]] = {
         "ad_sent_for_review":   "✅ Bildiriş barlaga iberildi.",
         "ad_rejected":          "❌ Bildiriş barlagdan geçmedi.",
 
-        # ── Düzedişler: hold, töleg ekrany, režimler ───────────────────────
-        "cancel_done_refund": "🗑 Bildiriş ýatyryldy. Çykmadyk çap etmeler balansa gaýtaryldy.",
+        # ── Elýeterli çap etme ýok, kart arkaly töleg ───────────────────────
         "btn_requisites": "📋 Maglumatlar",
         "dup_pending": "Şeýle bildiriş eýýäm barlagda.",
         "dup_hold":    "Şeýle bildiriş saklanyp, çap etmeleri satyn almagyňyza garaşýar.",
         "btn_status_short": "📋 Arzalarym",
         "ad_hold": (
             "📝 Bildiriş kabul edildi, ýöne elýeterli çap etme ýok — barlaga entek iberilmedi.\n\n"
-            "Paket satyn alyň: tölegden soň režim saýlaň, bildiriş barlaga gider."
+            "Paket satyn alyň — töleg tassyklanandan soň bildiriş özi barlaga gider."
         ),
         "btn_buy_short":     "💳 Çap etme satyn al",
         "btn_paid":          "✅ Tölänim",
@@ -521,54 +449,17 @@ TEXTS: dict[str, dict[str, str]] = {
         "pay_cancel_done_already": "Arza eýýäm ýapyldy.",
         "pay_already_review": "Çek alyndy, administratoryň barlagyna garaşyň.",
         "pay_already_confirmed": "Bu arza eýýäm tölenen.",
-        "pay_closed":        "Arza ýapyldy.",
         "pay_screen": (
             "💳 Arza #{id} · {qty} {word} · {price} ₽\n\n"
             "Geçirmek üçin kart:\n<code>{card}</code>{holder}\n\n"
             "Geçirenden soň «Tölänim» düwmesine basyp, çegi iberiň."
         ),
-        "mode_prompt": (
-            "Çap etme režimini saýlaň:\n\n"
-            "🤖 Awtomatik — bildiriş bir gezek barlanýar, ähli elýeterli çap etmeler "
-            "sapar senesine çenli deň paýlanýar we balansdan birbada hasapdan çykarylýar.\n\n"
-            "✋ El bilen — her gezek bildirişi forma arkaly özüňiz barlaga iberýärsiňiz; "
-            "çap etme bildiriş kanala çykanda hasapdan çykarylýar."
-        ),
-        "btn_mode_auto":   "🤖 Awtomatik",
-        "btn_mode_manual": "✋ El bilen",
-        "mode_saved_auto":   "🤖 Režim: awtomatik.",
-        "mode_saved_manual": "✋ Režim: el bilen.",
-        "mode_sent_review":  "#{id} bildiriş barlaga iberildi.",
-        "mode_auto_after":   "Makullanyndan soň çap etmeler sapar senesine çenli paýlanar.",
-        "mode_auto_partial": "Sapar senesine çenli {total} {word} içinden {usable} çykyp ýetişer: birmeňzeş bildirişi {hours} sagatda 1 gezekden köp çap edip bolmaýar. Galanlary balansda galar.",
-        "mode_manual_after": "Indiki bildiriş üçin formany täzeden dolduryň.",
-        "mode_no_draft":     "Taýyn bolanyňyzda bildiriş formasyny dolduryň.",
-        "mode_already":      "Režim eýýäm saýlanyldy.",
-        "auto_scheduled_user": (
-            "✅ Bildiriş makullandy. Meýilleşdirilen çap etmeler: {count}, balansdan hasapdan çykaryldy: {debited}.\n\n{times}"
-        ),
-        "auto_no_slots_user": "✅ Bildiriş makullandy, ýöne sapar senesine çenli çap etmäge wagt galmady.",
-        "buy_warning": (
-            "⚠️ Sapar wagty ýakyn — galdy: {days_text}.\n\n"
-            "Birmeňzeş bildirişi {hours} sagatda 1 gezekden köp çap edip bolmaýar, "
-            "şonuň üçin uçuşa çenli {qty} {word} içinden {usable} çykyp ýetişer.\n\n"
-            "Galanlary indiki bildirişler üçin balansda saklanar."
-        ),
-        "status_hold": "Ýagdaý: çap etme satyn almaga garaşýar (barlaga iberilmedi)",
 
-        # ── Çap etmeler, töleg, nobat (freemium) ────────────────────────────
+        # ── Çap etmeleriň balansy, ýagdaý, ýatyrmak ─────────────────────────
         "btn_buy":              "💳 Goşmaça çap etmeler",
-        "btn_status":           "📋 Ýagdaýy görmek",
-        "btn_cancel_short":     "Ýatyr",
         "btn_close":            "Ýap",
-        "open_draft_block": (
-            "⏳ Siziň barlaga ýa-da çap edilmegine garaşýan bildirişiňiz bar.\n\n"
-            "Täze bildiriş iberilmezden öň şu arzanyň tamamlanmagyna garaşyň."
-        ),
         "buy_menu":             "💳 Goşmaça çap etmeler\n\nPaket saýlaň:",
         "btn_pkg":              "{qty} {word} — {price} ₽",
-        "btn_buy_pkg":          "Satyn al: {qty} {word} — {price} ₽",
-        "btn_other_pkg":        "Başga paket saýla",
         "trip_passed_no_pay": (
             "⚠️ Bildirişdäki saparyň senesi geçdi, şonuň üçin ony çap edip bolmaýar we töleg gerek däl.\n\n"
             "Täze senesi bilen bildiriş dörediň."
@@ -585,33 +476,12 @@ TEXTS: dict[str, dict[str, str]] = {
         ),
         "btn_resend_receipt":   "🧾 Çegi täzeden ibermek",
         "btn_new_payment":      "💳 Täze arza",
-        "pay_resend_prompt":    "🧾 #{id} arza boýunça çegi (surat ýa-da faýl) şu çata iberiň.",
-        "ad_approved_user":     "✅ Bildirişiňiz makullandy we çap etmäge taýýar. Administrator ýakynda çap eder.",
-        "ad_waiting_payment_user": (
-            "💳 Bildiriş tölegi garaşýar: mugt çap etmek hazir eýelenen, balansda tölegli çap etme ýok.\n\n"
-            "Paket satyn alyň — bildiriş nobatda galar."
-        ),
         "ad_published_paid_note": "1 tölegli çap etme hasapdan çykaryldy. Balansda galdy: {balance}.",
-        "btn_create_new":       "✏️ Bildiriş döret",
-        "status_head":          "📋 Siziň #{id} bildirişiňiz",
-        "status_pending":       "Ýagdaý: moderatoryň barlagynda",
-        "status_approved":      "Ýagdaý: makullandy, administratoryň çap etmegine garaşýar",
-        "status_publishing":    "Ýagdaý: çap edilýär…",
-        "status_publish_error": "Ýagdaý: çap etme säwligi — administrator täzeden synanyşar",
-        "status_waiting_payment": "Töleg garaşylýar: mugt çap etme eýelenen, balansda tölegli ýok.",
-        "status_funding_free":  "Çap etme görnüşi: mugt",
-        "status_funding_paid":  "Çap etme görnüşi: tölegli",
         "status_balance":       "Balansdaky tölegli çap etmeler: {n}",
-        "status_next_at":       "Indiki çap etme şundan başlap elýeterli: {dt}",
         "status_no_open":       "Nobatda bildirişiňiz ýok.",
         "btn_cancel_ad":        "🗑 Bildirişi ýatyr",
-        "btn_use_paid":         "💳 Tölegli çap etmäni ulan",
-        "btn_use_free":         "🎁 Mugt çap etmäni ulan",
         "cancel_done":          "🗑 Bildiriş ýatyryldy. Balansdaky çap etmelere täsir edilmedi.",
         "cancel_failed":        "Bu bildirişi indi ýatyryp bolmaýar.",
-        "funding_changed":      "✅ Çap etme görnüşi üýtgedildi.",
-        "funding_free_taken":   "Mugt çap etme hazir işjeň bildiriş bilen eýelenen.",
-        "funding_no_balance":   "Balansda tölegli çap etme ýok.",
         "balance_text": (
             "💼 Siziň çap etmeleriňiz\n\n"
             "Balansda tölegli: {balance}\n"
@@ -621,19 +491,8 @@ TEXTS: dict[str, dict[str, str]] = {
         "balance_free_no":      "{dt} çenli işjeň bildiriş bilen eýelenen",
         "manual_credit_user":   "🎁 Administrator çap etme balansyňyzy üýtgetdi: {delta:+d}. Elýeterli: {balance}.",
         "ad_rejected_paid_note": "Satyn alan çap etmeleriňiz balansda saklandy.",
-        "unit_day_1": "gün", "unit_day_2": "gün", "unit_day_5": "gün",
         "unit_pub_1": "çap etme", "unit_pub_2": "çap etme", "unit_pub_5": "çap etme",
-        "today_word":           "bir günden az",
 
-        # ── Gaýtalanýan bildirişlerden goragy ────────────────────────────────
-        "duplicate_found": (
-            "🔁 Sizde eýýäm şeýle bildiriş bar — şol bir ugur, sene we habarlaşmak üçin maglumatlar.\n\n"
-            "Täzeden döretmegiň deregine, bar bolan bildirişi täzeden çap edip bilersiňiz — "
-            "ol ýene-de kanalda täze bolar."
-        ),
-        "btn_repeat_ad":        "🔁 Bildirişi gaýtala",
-        "ad_repeated":          "✅ Bildiriş täzeden çap edildi.",
-        "ad_repeat_failed":     "❌ Bildirişi gaýtalamak başartmady. Birazdan gaýtadan synanyşyň.",
         "ad_published_thanks": (
             "🎉 Bildirişiňiz kanala goýuldy.\n\n"
             "Pikir bildirmek isleýärsiňizmi? Teklip ýa-da bellik bar bolsa, "
