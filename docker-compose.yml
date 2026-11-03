@@ -1,12 +1,17 @@
 # Явное имя проекта — все ресурсы (контейнеры, сеть, volume) получают префикс
 # "tmdeliverbot_", поэтому на VPS с другими docker-compose проектами исключены
 # случайные пересечения имён.
-name: tmdeliverbot
+#
+# STACK_NAME позволяет поднять ВТОРУЮ независимую копию (тестовую) на той же
+# машине: в .env тестовой папки задаётся STACK_NAME=tmdeliverbot_test — и
+# контейнеры, сеть и том БД получают другие имена. Если переменная не задана
+# (боевой сервер) — имена остаются прежними, ничего не меняется.
+name: ${STACK_NAME:-tmdeliverbot}
 
 services:
   bot:
     build: .
-    container_name: tmdeliverbot_bot
+    container_name: ${STACK_NAME:-tmdeliverbot}_bot
     restart: unless-stopped
     env_file:
       - .env
@@ -35,7 +40,7 @@ services:
 
   db:
     image: postgres:16-alpine
-    container_name: tmdeliverbot_db
+    container_name: ${STACK_NAME:-tmdeliverbot}_db
     restart: unless-stopped
     environment:
       POSTGRES_DB: tmdeliverbot
@@ -68,8 +73,8 @@ networks:
   # Отдельная bridge-сеть только для этого проекта — контейнеры других
   # сервисов на VPS в неё не входят и друг друга не видят.
   internal:
-    name: tmdeliverbot_internal
+    name: ${STACK_NAME:-tmdeliverbot}_internal
 
 volumes:
   db_data:
-    name: tmdeliverbot_db_data
+    name: ${STACK_NAME:-tmdeliverbot}_db_data
