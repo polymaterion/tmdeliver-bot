@@ -678,7 +678,7 @@ async def test_form_without_publications_is_saved_but_not_sent_to_admin():
     await main.confirm_yes(FakeCB(uid, "confirm:yes"), FakeState(form()), bot)
     assert bot.to(1) == []
     user_msgs = bot.to(uid)
-    assert len(user_msgs) == 1 and "доступных публикаций нет" in user_msgs[0]["text"]
+    assert len(user_msgs) == 1 and "бесплатное активное объявление" in user_msgs[0]["text"]
     assert "режим" not in user_msgs[0]["text"].lower()
     assert set(bot.buttons(user_msgs[0])) >= {"buy:menu"}
     row = await main.pool().fetchrow("SELECT * FROM drafts WHERE user_id=$1 ORDER BY id DESC LIMIT 1", uid)
@@ -757,7 +757,7 @@ async def test_purchase_warning_about_dates_is_gone():
     main.CARD_NUMBER = "1111 2222 3333 4444"
     await main.buy_pkg_cb(FakeCB(uid, "buy:pkg:5"), bot)
     text = " ".join(m["text"] for m in bot.to(uid))
-    assert "24" not in text and "не успеете" not in text and "Заявка #" in text
+    assert "24" not in text and "не успеете" not in text and "Заявка №" in text
 
 
 async def test_confirmed_payment_sends_held_ad_to_moderation_automatically():
