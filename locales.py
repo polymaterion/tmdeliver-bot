@@ -264,7 +264,7 @@ TEXTS: dict[str, dict[str, str]] = {
         # ── Баланс публикаций, статус, отмена ───────────────────────────────
         "btn_buy":              "💳 Дополнительные публикации",
         "btn_close":            "Закрыть",
-        "buy_menu":             "💳 Дополнительные публикации\n\nВыберите пакет:",
+        "buy_menu":             "Платные публикации\n\nВы можете публиковать объявления в любое время. Каждая публикация будет списываться с вашего баланса оплаченных публикаций.\n\nВыберите вариант:",
         "btn_pkg":              "{qty} {word} — {price} ₽",
         "trip_passed_no_pay": (
             "⚠️ Дата поездки в вашем объявлении уже прошла, поэтому опубликовать его нельзя, "
@@ -449,7 +449,7 @@ TEXTS: dict[str, dict[str, str]] = {
         # ── Çap etmeleriň balansy, ýagdaý, ýatyrmak ─────────────────────────
         "btn_buy":              "💳 Goşmaça çap etmeler",
         "btn_close":            "Ýap",
-        "buy_menu":             "💳 Goşmaça çap etmeler\n\nPaket saýlaň:",
+        "buy_menu":             "Tölegli bildirişler\n\nBildirişleri islän wagtyňyz çap edip bilersiňiz. Her çap edilen bildiriş tölegli bildirişleriňiziň balansyndan aýrylar.\n\nGörnüş saýlaň:",
         "btn_pkg":              "{qty} {word} — {price} ₽",
         "trip_passed_no_pay": (
             "⚠️ Bildirişdäki saparyň senesi geçdi, şonuň üçin ony çap edip bolmaýar we töleg gerek däl.\n\n"

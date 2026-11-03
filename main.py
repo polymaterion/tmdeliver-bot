@@ -3123,7 +3123,7 @@ async def cmd_buy(message: Message, bot: Bot) -> None:
 async def buy_menu_cb(callback: CallbackQuery, bot: Bot) -> None:
     await callback.answer()
     lang = await get_user_lang(callback.from_user.id)
-    text = await _own_balance_text(callback.from_user.id, lang) + "\n\n" + t(lang, "buy_menu")
+    text = t(lang, "buy_menu")
     await replace_bot_msg(bot, callback.message.chat.id, callback.message.message_id, text, kb_buy_menu(lang))
 
 
