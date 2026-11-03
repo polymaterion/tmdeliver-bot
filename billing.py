@@ -676,7 +676,7 @@ async def confirm_payment(pool: asyncpg.Pool, payment_id: int, admin_id: int) ->
             balance = await _apply_ledger(
                 conn, user_id=int(p["user_id"]), delta=int(p["qty"]), kind="purchase",
                 op_key=f"pay:{payment_id}", payment_id=payment_id, admin_id=admin_id,
-                reason=f"Оплата заявки #{payment_id}",
+                reason=f"Оплата заявки №{payment_id}",
             )
             p = await conn.fetchrow(
                 "UPDATE payments SET status='confirmed', reviewed_by=$2, reviewed_at=now(), updated_at=now() "

@@ -152,7 +152,7 @@ TEXTS: dict[str, dict[str, str]] = {
 
         # ── Выбор типа объявления ────────────────────────────────────────
         "choose_ad_type":      "Выберите тип объявления:",
-        "btn_ad_carrier":      "✈️ Лечу — возьму посылки",
+        "btn_ad_carrier":      "✈️ Лечу сам",
         "btn_ad_seeker":       "🔎 Ищу попутчика",
 
         # ── Перевозчик: маршрут ──────────────────────────────────────────
@@ -244,20 +244,19 @@ TEXTS: dict[str, dict[str, str]] = {
         "dup_hold":    "Такое объявление уже сохранено и ждёт покупки публикаций.",
         "btn_status_short": "📋 Мои заявки",
         "ad_hold": (
-            "📝 Объявление принято, но доступных публикаций нет — на проверку оно пока не отправлено.\n\n"
-            "Купите пакет — после подтверждения оплаты объявление уйдёт на проверку само."
+            "У вас уже есть одно бесплатное активное объявление. Чтобы разместить ещё одно, оплатите публикации"
         ),
-        "btn_buy_short":     "💳 Купить публикации",
+        "btn_buy_short":     "💳 Оплатить публикации",
         "btn_paid":          "✅ Я оплатил",
         "btn_cancel_pay":    "❌ Отмена",
-        "pay_send_receipt":  "🧾 Отправьте фото или файл чека по заявке #{id} в этот чат.",
-        "pay_cancelled":     "❌ Заявка #{id} отменена.",
-        "pay_cancel_review": "Чек уже отправлен на проверку — отменить заявку нельзя.",
+        "pay_send_receipt":  "🧾 Отправьте фото или файл чека по заявке №{id} в этот чат.",
+        "pay_cancelled":     "❌ Заявка №{id} отменена.",
+        "pay_cancel_review": "Чек уже отправлен на проверку, отменить заявку нельзя.",
         "pay_cancel_done_already": "Заявка уже закрыта.",
         "pay_already_review": "Чек уже получен, ожидайте проверки администратором.",
         "pay_already_confirmed": "Эта заявка уже оплачена.",
         "pay_screen": (
-            "💳 Заявка #{id} · {qty} {word} · {price} ₽\n\n"
+            "💳 Заявка №{id} · {qty} {word} · {price} ₽\n\n"
             "Карта для перевода:\n<code>{card}</code>{holder}\n\n"
             "После перевода нажмите «Я оплатил» и отправьте чек."
         ),
@@ -273,13 +272,13 @@ TEXTS: dict[str, dict[str, str]] = {
             "Создайте объявление с актуальной датой поездки."
         ),
         "pay_no_card":          "⚠️ Реквизиты для оплаты временно не настроены. Напишите в поддержку.",
-        "pay_receipt_received": "🧾 Чек по заявке #{id} получен. Администратор проверит оплату — мы сообщим о результате.",
+        "pay_receipt_received": "🧾 Чек по заявке №{id} получен. Администратор проверит оплату — мы сообщим о результате.",
         "pay_confirmed_user": (
-            "✅ Оплата по заявке #{id} подтверждена.\n\n"
+            "✅ Оплата по заявке №{id} подтверждена.\n\n"
             "На баланс начислено: {qty} {word}. Доступно платных публикаций: {balance}."
         ),
         "pay_rejected_user": (
-            "❌ Чек по заявке #{id} отклонён. Публикации не начислены.\n\n"
+            "❌ Чек по заявке №{id} отклонён. Публикации не начислены.\n\n"
             "Вы можете отправить чек повторно или создать новую заявку."
         ),
         "btn_resend_receipt":   "🧾 Отправить чек повторно",
@@ -302,18 +301,13 @@ TEXTS: dict[str, dict[str, str]] = {
         "unit_pub_1": "публикация", "unit_pub_2": "публикации", "unit_pub_5": "публикаций",
 
         "ad_published_thanks": (
-            "🎉 Ваше объявление опубликовано.\n\n"
-            "Хотите оставить отзыв? Может есть предложения или замечания? "
-            "Будем рады вашему отзыву."
+            "🎉 Объявление успешно опубликовано!\n\nПомогите нам стать лучше — поделитесь отзывом или предложите, что можно улучшить."
         ),
 
         # ── Отзыв ─────────────────────────────────────────────────────────
         "btn_leave_feedback":   "💬 Оставить отзыв",
         "ask_feedback": (
-            "Напишите одним сообщением ваш отзыв о боте или канале.\n\n"
-            "Нам будет полезно узнать, что вам понравилось, что можно улучшить "
-            "и каких функций не хватает.\n\n"
-            "Мы читаем все отзывы и используем их для развития проекта."
+            "Напишите, что вам нравится в боте или канале и что можно улучшить. Мы читаем все отзывы и учитываем ваши предложения."
         ),
         "feedback_thanks":      "Ваш отзыв получен! Спасибо за обратную связь 😊",
 
@@ -353,13 +347,13 @@ TEXTS: dict[str, dict[str, str]] = {
         "not_subscribed_yet":  "Siz entäk kanala agza bolmadyňyz 👀",
         "subscribe_first":     "Ilki kanala agza boluň",
 
-        "choose_ad_type":      "Bildiriş görnüşini saýlaň:",
+        "choose_ad_type":      "Bildirişiň görnüşini saýlaň:",
         "btn_ad_carrier":      "✈️ Özüm gidip barýaryn",
-        "btn_ad_seeker":       "🔎 Gidip barýan gözleýärin",
+        "btn_ad_seeker":       "🔎 Gidip barýany gözleýärin",
 
         "how_many_cities":     "Ugruňyzda näçe şäher bar?",
         "city_from":           "Haýsy şäherden ugraýarsyňyz?",
-        "city_to":             "Haýsy şähere baryarsyňyz?",
+        "city_to":             "Haýsy şähere barýarsyňyz?",
         "city_step_n":         "{total}-den {step}-nji şäheri görkeziň:",
         "route_so_far":        "\n\nUgur: {route}",
         "city_already_used":   "⚠️ Bu şäher eýýäm ondan öň bar. Başga saýlaň.",
@@ -412,11 +406,11 @@ TEXTS: dict[str, dict[str, str]] = {
         "seeker_what_to_pass":   "Näme ibermeli?",
 
         # ── Ýoldaş gözleg netijeleri ─────────────────────────────────────
-        "search_looking":        "🔍 Laýyk gelýän ýoldaşlar gözlenýär…",
-        "search_found_header":   "🎉 Laýyk gelýän wariantlar tapyldy!\n\nSiziň marşrutyňyz bilen gidýänler:",
-        "search_none_found":     "😕 Häzirlikçe siziň marşrutyňyz bilen hiç kim uçmaýar.\n\nÖz yglanyňyzy ýerleşdirip bilersiňiz — ýoldaş tapylan badyna siz ilkinjileriň hatarynda görersiňiz.",
-        "search_not_matched":    "Teklip edilen wariantlar size laýyk gelmedik bolsa, yglanyňyzy ýerleşdirip bilersiňiz.",
-        "btn_place_ad":          "📢 Yglan ýerleşdir",
+        "search_looking":        "🔍 Laýyk gelýän bildiriş gözlenýär…",
+        "search_found_header":   "🎉 Laýyk gelýän bildiriş tapyldy!\n\nSiziň ugruňyz boýunça gidýänler:",
+        "search_none_found":     "😕 Häzirlikçe siziň marşrutyňyz bilen hiç kim uçmaýar.\n\nÖz bildirişiňizi ýerleşdirip bilersiňiz, ugurdaş tapylan badyna siz ilkinjileriň hatarynda görersiňiz.",
+        "search_not_matched":    "Teklip edilen bildirişler size laýyk gelmedik bolsa, öz bildirişiňizi ýerleşdirip bilersiňiz.",
+        "btn_place_ad":          "📢 Bildiriş ýerleşdir",
 
         "preview_check_ad":      "👀 <b>Bildirişi barlaň:</b>\n\n",
 
@@ -437,22 +431,19 @@ TEXTS: dict[str, dict[str, str]] = {
         "dup_hold":    "Şeýle bildiriş saklanyp, çap etmeleri satyn almagyňyza garaşýar.",
         "btn_status_short": "📋 Arzalarym",
         "ad_hold": (
-            "📝 Bildiriş kabul edildi, ýöne elýeterli çap etme ýok — barlaga entek iberilmedi.\n\n"
-            "Paket satyn alyň — töleg tassyklanandan soň bildiriş özi barlaga gider."
+            "Siziň eýýäm bir sany mugt işjeň bildirişiňiz bar. Ýene birini ýerleşdirmek üçin, bildirişleriň tölegini töläň"
         ),
-        "btn_buy_short":     "💳 Çap etme satyn al",
-        "btn_paid":          "✅ Tölänim",
+        "btn_buy_short":     "💳 Bildirişi tölemek",
+        "btn_paid":          "✅ Töledim",
         "btn_cancel_pay":    "❌ Ýatyr",
-        "pay_send_receipt":  "🧾 #{id} arza boýunça çegiň suratyny ýa-da faýlyny şu çata iberiň.",
-        "pay_cancelled":     "❌ #{id} arza ýatyryldy.",
-        "pay_cancel_review": "Çek barlaga iberildi — arzany ýatyryp bolmaýar.",
+        "pay_send_receipt":  "🧾 №{id} arza boýunça çegiň suratyny ýa-da faýlyny şu çata iberiň.",
+        "pay_cancelled":     "❌ №{id} arza ýatyryldy.",
+        "pay_cancel_review": "Çek barlaga iberildi, arzany ýatyryp bolmaýar.",
         "pay_cancel_done_already": "Arza eýýäm ýapyldy.",
         "pay_already_review": "Çek alyndy, administratoryň barlagyna garaşyň.",
         "pay_already_confirmed": "Bu arza eýýäm tölenen.",
         "pay_screen": (
-            "💳 Arza #{id} · {qty} {word} · {price} ₽\n\n"
-            "Geçirmek üçin kart:\n<code>{card}</code>{holder}\n\n"
-            "Geçirenden soň «Tölänim» düwmesine basyp, çegi iberiň."
+            "💳 Arza №{id} · {qty} {word} · {price} ₽\n\nGeçirmek üçin kart:\n<code>{card}</code>{holder}\n\nGeçirenden soň «Töledim» düwmesine basyp, çegi iberiň."
         ),
 
         # ── Çap etmeleriň balansy, ýagdaý, ýatyrmak ─────────────────────────
@@ -465,13 +456,13 @@ TEXTS: dict[str, dict[str, str]] = {
             "Täze senesi bilen bildiriş dörediň."
         ),
         "pay_no_card":          "⚠️ Töleg maglumatlary wagtlaýyn sazlanmady. Goldawa ýazyň.",
-        "pay_receipt_received": "🧾 #{id} arza boýunça çek alyndy. Administrator barlar — netijäni habar bereris.",
+        "pay_receipt_received": "🧾 №{id} arza boýunça çek alyndy. Administrator barlar — netijäni habar bereris.",
         "pay_confirmed_user": (
-            "✅ #{id} arza boýunça töleg tassyklandy.\n\n"
+            "✅ №{id} arza boýunça töleg tassyklandy.\n\n"
             "Balansa goşuldy: {qty} {word}. Elýeterli tölegli çap etmeler: {balance}."
         ),
         "pay_rejected_user": (
-            "❌ #{id} arza boýunça çek ret edildi. Çap etmeler goşulmady.\n\n"
+            "❌ №{id} arza boýunça çek ret edildi. Çap etmeler goşulmady.\n\n"
             "Çegi täzeden iberip ýa-da täze arza döredip bilersiňiz."
         ),
         "btn_resend_receipt":   "🧾 Çegi täzeden ibermek",
@@ -494,19 +485,14 @@ TEXTS: dict[str, dict[str, str]] = {
         "unit_pub_1": "çap etme", "unit_pub_2": "çap etme", "unit_pub_5": "çap etme",
 
         "ad_published_thanks": (
-            "🎉 Bildirişiňiz kanala goýuldy.\n\n"
-            "Pikir bildirmek isleýärsiňizmi? Teklip ýa-da bellik bar bolsa, "
-            "pikiriňize begenerdik."
+            "🎉 Bildirişiňiz üstünlikli çap edildi!\n\nBize has-da gowy bolmaga kömek ediň — teswirleriňizi we teklipleriňizi paýlaşyň."
         ),
 
-        "btn_leave_feedback":   "💬 Pikir bildir",
+        "btn_leave_feedback":   "💬 Teswir ýaz",
         "ask_feedback": (
-            "Bot ýa-da kanal barada pikiriňizi bir gezekde ýazyň.\n\n"
-            "Näme halanyňyzy, nämäni gowulandyrmalydygyny we "
-            "haýsy funksiýalaryň ýetmeýändigini bilmek bize peýdaly bolar.\n\n"
-            "Biz ähli pikirleri okaýarys we kanaly we boty gowylandyrmak üçin ulanýarys."
+            "Bot ýa-da kanal barada pikirleriňizi ýazyň: size näme ýaraýar we nämäni gowulandyryp bolar? Ähli teswirleriňizi okaýarys we teklipleriňizi göz öňünde tutýarys."
         ),
-        "feedback_thanks":      "Pikiriňiz kabul edildi! Sag boluň 😊",
+        "feedback_thanks":      "Teswiriňiz kabul edildi! Sag boluň 😊",
 
         "btn_create_ad":         "✏️ Bildiriş döret",
 
@@ -514,13 +500,7 @@ TEXTS: dict[str, dict[str, str]] = {
         "your_active_ads":       "📋 <b>Işjeň bildirişleriňiz ({count}):</b>\n",
 
         "help_text": (
-            "🆘 <b>Kömek</b>\n\n"
-            "Ähli soraglar üçin @{username} bilen habarlaşyň\n\n"
-            "<b>Buýruklar:</b>\n"
-            "/start — boty täzeden başlat\n"
-            "/posts — işjeň bildirişlerim\n"
-            "/language — dili üýtget\n"
-            "/help — kömek"
+            "🆘 <b>Goldaw</b>\n\nÄhli soraglar üçin @{username} bilen habarlaşyň\n\n<b>Buýruklar:</b>\n/start — boty täzeden başlat\n/posts — işjeň bildirişlerim\n/language — dili üýtget\n/help — kömek"
         ),
     },
 }
