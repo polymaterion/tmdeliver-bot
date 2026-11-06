@@ -136,7 +136,7 @@ TEXTS: dict[str, dict[str, str]] = {
     "ru": {
 
         # ── Выбор языка ──────────────────────────────────────────────────
-        "choose_language": "🌐 Выберите язык бота:",
+        "choose_language": "Выберите язык бота:",
         "language_changed": "✅ Язык изменён на русский.",
 
         # ── /start и подписка ────────────────────────────────────────────
@@ -333,7 +333,7 @@ TEXTS: dict[str, dict[str, str]] = {
     # ═══════════════════════════════════════════════════════════════════════
     "tk": {
 
-        "choose_language": "🌐 Botuň dilini saýlaň:",
+        "choose_language": "Botuň dilini saýlaň:",
         "language_changed": "✅ Dil türkmen diline üýtgedildi.",
 
         "start_welcome": (
