@@ -6,7 +6,7 @@ import asyncio
 import os
 import sys
 import tempfile
-from datetime import timedelta
+from datetime import datetime, timedelta
 
 import pytest
 import pytest_asyncio
@@ -81,12 +81,14 @@ class FakeChat:
 class FakeMsg:
     def __init__(self, uid, mid=500):
         self.chat, self.message_id, self.replies = FakeChat(uid), mid, []
+        self.reply_markups = []
 
     async def edit_reply_markup(self, **kw):
         return True
 
     async def reply(self, text, **kw):
         self.replies.append(text)
+        self.reply_markups.append(kw.get("reply_markup"))
 
 
 class FakeCB:
@@ -810,3 +812,68 @@ async def test_status_screen_shows_hold_with_buy_and_cancel_buttons():
     buttons = [b.callback_data for row in kb.inline_keyboard for b in row]
     assert "ждёт покупки публикаций" in text
     assert "buy:menu" in buttons and any(b.startswith("mycancel:") for b in buttons)
+
+
+# ── Отложить: «Назад» и прошедшее время; кнопки после публикации ─────────────
+
+def _cbs(markup):
+    return [b.callback_data for row in markup.inline_keyboard for b in row]
+
+
+async def test_schedule_keyboards_have_back_and_hide_past_hours(monkeypatch):
+    monkeypatch.setattr(main, "now_local", lambda: datetime(2026, 11, 12, 14, 30))
+    dates = main.kb_schedule_dates(7)
+    assert "sd:7:0" in _cbs(dates) and _cbs(dates)[-1] == "sback:7"
+    times = main.kb_schedule_times(7, 0)
+    cbs = _cbs(times)
+    assert "st:7:0:14" not in cbs and "st:7:0:15" in cbs and cbs[-1] == "tback:7"
+    assert "st:7:0:6" not in cbs
+    assert "st:7:1:6" in _cbs(main.kb_schedule_times(7, 1))     # завтра — все часы
+    monkeypatch.setattr(main, "now_local", lambda: datetime(2026, 11, 12, 23, 30))
+    assert "sd:7:0" not in _cbs(main.kb_schedule_dates(7))       # на сегодня часов не осталось
+    assert "sd:7:1" in _cbs(main.kb_schedule_dates(7))
+
+
+async def test_schedule_rejects_hour_that_already_passed(monkeypatch):
+    uid = new_uid()
+    d = await mk(uid)
+    monkeypatch.setattr(main, "now_local", lambda: datetime(2026, 11, 12, 14, 30))
+    cb = FakeCB(1, f"st:{d}:0:10")
+    await main.sched_pick_time(cb)
+    assert cb.answers and cb.answers[-1][1] is True
+    assert (await main.get_draft(d))["scheduled_at"] is None
+
+
+async def test_back_buttons_restore_previous_admin_keyboards():
+    cb = FakeCB(1, "sback:5")
+    await main.sched_back_to_main(cb)
+    await main.sched_back_to_dates(FakeCB(1, "tback:5"))
+
+
+async def test_admin_gets_link_and_delete_buttons_and_delete_works():
+    uid, bot = new_uid(), FakeBot()
+    d = await mk(uid)
+    cb = FakeCB(1, f"publish:{d}")
+    await main.publish_draft(cb, bot)
+    mk_after = cb.message.reply_markups[-1]
+    rows = [b for row in mk_after.inline_keyboard for b in row]
+    assert rows[0].url and rows[0].url.startswith("https://t.me/")
+    assert rows[1].callback_data == f"pdel:{d}"
+    assert await status_of(d) == "published"
+
+    await main.published_delete_do(FakeCB(1, f"pdelc:{d}"), bot)
+    row = await main.get_draft(d)
+    assert row["status"] == "deleted" and row["expired"] is True
+
+    again = FakeCB(1, f"pdelc:{d}")
+    await main.published_delete_do(again, bot)
+    assert again.answers[-1][1] is True
+
+
+async def test_delete_is_admin_only():
+    uid, bot = new_uid(), FakeBot()
+    d = await mk(uid)
+    await publish(bot, d)
+    cb = FakeCB(uid, f"pdelc:{d}")
+    await main.published_delete_do(cb, bot)
+    assert await status_of(d) == "published"
