@@ -136,7 +136,7 @@ TEXTS: dict[str, dict[str, str]] = {
     "ru": {
 
         # ── Выбор языка ──────────────────────────────────────────────────
-        "choose_language": "Выберите язык бота:",
+        "choose_language": "🌐 Выберите язык бота:",
         "language_changed": "✅ Язык изменён на русский.",
 
         # ── /start и подписка ────────────────────────────────────────────
@@ -262,7 +262,7 @@ TEXTS: dict[str, dict[str, str]] = {
         ),
 
         # ── Баланс публикаций, статус, отмена ───────────────────────────────
-        "btn_buy":              "💳 Дополнительные публикации",
+        "btn_buy":              "💳 Платные публикации",
         "btn_close":            "Закрыть",
         "buy_menu":             "Платные публикации\n\nВы можете публиковать объявления в любое время. Каждая публикация будет списываться с вашего баланса оплаченных публикаций.\n\nВыберите вариант:",
         "btn_pkg":              "{qty} {word} — {price} ₽",
@@ -333,7 +333,7 @@ TEXTS: dict[str, dict[str, str]] = {
     # ═══════════════════════════════════════════════════════════════════════
     "tk": {
 
-        "choose_language": "Botuň dilini saýlaň:",
+        "choose_language": "🌐 Botuň dilini saýlaň:",
         "language_changed": "✅ Dil türkmen diline üýtgedildi.",
 
         "start_welcome": (
@@ -447,7 +447,7 @@ TEXTS: dict[str, dict[str, str]] = {
         ),
 
         # ── Çap etmeleriň balansy, ýagdaý, ýatyrmak ─────────────────────────
-        "btn_buy":              "💳 Goşmaça çap etmeler",
+        "btn_buy":              "💳 Tölegli bildirişler",
         "btn_close":            "Ýap",
         "buy_menu":             "Tölegli bildirişler\n\nBildirişleri islän wagtyňyz çap edip bilersiňiz. Her çap edilen bildiriş tölegli bildirişleriňiziň balansyndan aýrylar.\n\nGörnüş saýlaň:",
         "btn_pkg":              "{qty} {word} — {price} ₽",

@@ -1122,10 +1122,28 @@ def kb_admin(draft_id: int) -> InlineKeyboardMarkup:
     ])
 
 
+def _sched_hours(day_offset: int) -> list[int]:
+    """Часы, доступные для отложенной публикации. Для сегодняшнего дня — только те, что ещё не наступили."""
+    hours = list(range(6, 24))
+    if day_offset == 0:
+        now_h = now_local().hour
+        hours = [h for h in hours if h > now_h]
+    return hours
+
+
+def _with_back_row(markup: InlineKeyboardMarkup, callback_data: str) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(inline_keyboard=[
+        *markup.inline_keyboard,
+        [InlineKeyboardButton(text="⬅️ Назад", callback_data=callback_data)],
+    ])
+
+
 def kb_schedule_dates(draft_id: int) -> InlineKeyboardMarkup:
     today = local_date()
     b = InlineKeyboardBuilder()
     for offset in range(7):
+        if not _sched_hours(offset):      # на сегодня уже не осталось свободных часов
+            continue
         d     = today + timedelta(days=offset)
         label = d.strftime("%d.%m")
         if offset == 0:
@@ -1134,15 +1152,30 @@ def kb_schedule_dates(draft_id: int) -> InlineKeyboardMarkup:
             label = f"Завтра {label}"
         b.button(text=label, callback_data=f"sd:{draft_id}:{offset}")
     b.adjust(2)
-    return b.as_markup()
+    return _with_back_row(b.as_markup(), f"sback:{draft_id}")
 
 
 def kb_schedule_times(draft_id: int, day_offset: int) -> InlineKeyboardMarkup:
     b = InlineKeyboardBuilder()
-    for hour in range(6, 24):
+    for hour in _sched_hours(day_offset):
         b.button(text=f"{hour:02d}:00", callback_data=f"st:{draft_id}:{day_offset}:{hour}")
     b.adjust(4)
-    return b.as_markup()
+    return _with_back_row(b.as_markup(), f"tback:{draft_id}")
+
+
+def kb_published_admin(draft_id: int, channel_msg_id: int) -> InlineKeyboardMarkup:
+    """Кнопки админу под сообщением об опубликованном объявлении."""
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="🔗 Публикация", url=get_post_url(int(channel_msg_id)))],
+        [InlineKeyboardButton(text="🗑 Удалить",    callback_data=f"pdel:{draft_id}")],
+    ])
+
+
+def kb_delete_confirm(draft_id: int) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="🗑 Да, удалить", callback_data=f"pdelc:{draft_id}")],
+        [InlineKeyboardButton(text="⬅️ Назад",       callback_data=f"pdelb:{draft_id}")],
+    ])
 
 
 def kb_group_post(post_url: str) -> InlineKeyboardMarkup:
@@ -1551,7 +1584,9 @@ async def scheduler_loop(bot: Bot) -> None:
                 logger.info("Scheduler: publishing draft %s", draft_id)
                 res = await _execute_publication(bot, draft_id)
                 if res["status"] == "published":
-                    await _notify_admins(bot, f"✅ Отложенное объявление №{draft_id} опубликовано.")
+                    await _notify_admins(
+                        bot, f"✅ Отложенное объявление №{draft_id} опубликовано.",
+                        markup=kb_published_admin(draft_id, res["channel_msg_id"]))
                     continue
                 if res["status"] == "claim_failed":
                     claim = res["claim"]
@@ -2815,6 +2850,13 @@ async def sched_pick_date(callback: CallbackQuery) -> None:
         return
     _, draft_id_s, offset_s = callback.data.split(":")
     draft_id, day_offset = int(draft_id_s), int(offset_s)
+    if not _sched_hours(day_offset):
+        await callback.answer("На эту дату свободного времени уже нет", show_alert=True)
+        try:
+            await callback.message.edit_reply_markup(reply_markup=kb_schedule_dates(draft_id))
+        except Exception:
+            pass
+        return
     chosen_date = (local_date() + timedelta(days=day_offset)).strftime("%d.%m.%Y")
     await callback.answer(f"Дата: {chosen_date}. Выберите время:")
     try:
@@ -2844,6 +2886,14 @@ async def sched_pick_time(callback: CallbackQuery) -> None:
         await callback.answer(f"Отложить нельзя (статус: {draft['status']})", show_alert=True)
         return
 
+    if hour not in _sched_hours(day_offset):
+        await callback.answer("Это время уже прошло. Выберите другое.", show_alert=True)
+        try:
+            await callback.message.edit_reply_markup(reply_markup=kb_schedule_times(draft_id, day_offset))
+        except Exception:
+            pass
+        return
+
     chosen_date  = local_date() + timedelta(days=day_offset)
     scheduled_at = f"{chosen_date.strftime('%d.%m.%Y')} {hour:02d}:00"
     await set_scheduled(draft_id, scheduled_at)
@@ -2856,6 +2906,34 @@ async def sched_pick_time(callback: CallbackQuery) -> None:
             new_text, parse_mode="HTML",
             disable_web_page_preview=True, reply_markup=None,
         )
+    except Exception:
+        pass
+
+
+@router.callback_query(F.data.startswith("sback:"))
+async def sched_back_to_main(callback: CallbackQuery) -> None:
+    """Назад из выбора даты — к кнопкам Опубликовать / Отложить / Отклонить."""
+    if callback.from_user.id not in ADMIN_IDS:
+        await callback.answer("Нет доступа", show_alert=True)
+        return
+    draft_id = int(callback.data.split(":")[1])
+    await callback.answer()
+    try:
+        await callback.message.edit_reply_markup(reply_markup=kb_admin(draft_id))
+    except Exception:
+        pass
+
+
+@router.callback_query(F.data.startswith("tback:"))
+async def sched_back_to_dates(callback: CallbackQuery) -> None:
+    """Назад из выбора времени — к выбору даты."""
+    if callback.from_user.id not in ADMIN_IDS:
+        await callback.answer("Нет доступа", show_alert=True)
+        return
+    draft_id = int(callback.data.split(":")[1])
+    await callback.answer()
+    try:
+        await callback.message.edit_reply_markup(reply_markup=kb_schedule_dates(draft_id))
     except Exception:
         pass
 
@@ -2938,7 +3016,84 @@ async def publish_draft(callback: CallbackQuery, bot: Bot) -> None:
         extra = f" Списана 1 платная публикация, остаток: {fin['balance']}."
     elif fin.get("funding") == "free":
         extra = " Бесплатная публикация (платный баланс не тронут)."
-    await callback.message.reply(f"{raw('check')} Объявление №{draft_id} опубликовано.{extra}")
+    await callback.message.reply(
+        f"{raw('check')} Объявление №{draft_id} опубликовано.{extra}",
+        reply_markup=kb_published_admin(draft_id, res["channel_msg_id"]),
+    )
+
+
+@router.callback_query(F.data.startswith("pdel:"))
+async def published_delete_ask(callback: CallbackQuery) -> None:
+    if callback.from_user.id not in ADMIN_IDS:
+        await callback.answer("Нет доступа", show_alert=True)
+        return
+    draft_id = int(callback.data.split(":")[1])
+    await callback.answer()
+    try:
+        await callback.message.edit_text(
+            f"🗑 Удалить объявление №{draft_id} из канала? Платная публикация на баланс не вернётся.",
+            reply_markup=kb_delete_confirm(draft_id),
+        )
+    except Exception:
+        pass
+
+
+@router.callback_query(F.data.startswith("pdelb:"))
+async def published_delete_back(callback: CallbackQuery) -> None:
+    if callback.from_user.id not in ADMIN_IDS:
+        await callback.answer("Нет доступа", show_alert=True)
+        return
+    draft_id = int(callback.data.split(":")[1])
+    draft = await get_draft(draft_id)
+    await callback.answer()
+    if not draft or not draft["channel_msg_id"]:
+        return
+    try:
+        await callback.message.edit_text(
+            f"{raw('check')} Объявление №{draft_id} опубликовано.",
+            reply_markup=kb_published_admin(draft_id, int(draft["channel_msg_id"])),
+        )
+    except Exception:
+        pass
+
+
+@router.callback_query(F.data.startswith("pdelc:"))
+async def published_delete_do(callback: CallbackQuery, bot: Bot) -> None:
+    """Удаляет опубликованное объявление из канала и тизеры из групп, ставит статус «deleted»."""
+    if callback.from_user.id not in ADMIN_IDS:
+        await callback.answer("Нет доступа", show_alert=True)
+        return
+    draft_id = int(callback.data.split(":")[1])
+    draft = await get_draft(draft_id)
+    if not draft:
+        await callback.answer("Заявка не найдена", show_alert=True)
+        return
+    if draft["status"] != "published" or not draft["channel_msg_id"]:
+        await callback.answer("Объявление уже удалено или не опубликовано", show_alert=True)
+        try:
+            await callback.message.edit_reply_markup(reply_markup=None)
+        except Exception:
+            pass
+        return
+    try:
+        await bot.delete_message(chat_id=CHANNEL_ID, message_id=int(draft["channel_msg_id"]))
+    except Exception as ex:
+        # пост уже удалён вручную — считаем успехом; любая другая ошибка — ничего не меняем
+        if "not found" not in str(ex).lower():
+            logger.warning("Channel post delete failed (draft %s): %s", draft_id, ex)
+            await callback.answer(f"Не удалось удалить пост: {str(ex)[:150]}", show_alert=True)
+            return
+    for t_chat_id, t_msg_id in await get_teasers(draft_id):
+        await _delete(bot, t_chat_id, t_msg_id)
+    async with pool().acquire() as conn:
+        await conn.execute(
+            "UPDATE drafts SET status='deleted', expired=TRUE, status_changed_at=now() "
+            "WHERE id=$1 AND status='published'", draft_id)
+    await callback.answer("Удалено")
+    try:
+        await callback.message.edit_text(f"🗑 Объявление №{draft_id} удалено из канала.", reply_markup=None)
+    except Exception:
+        pass
 
 
 # ════════════════════════════════════════════════════════════════════════════
@@ -2955,7 +3110,7 @@ PAYMENT_STATUS_RU = {
 DRAFT_STATUS_RU = {
     "hold": "ждёт покупки публикаций", "pending": "на модерации", "publishing": "публикуется",
     "publish_error": "ошибка публикации", "published": "опубликовано",
-    "rejected": "отклонено", "cancelled": "отменено",
+    "rejected": "отклонено", "cancelled": "отменено", "deleted": "удалено",
 }
 
 
